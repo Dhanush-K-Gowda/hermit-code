@@ -1,0 +1,39 @@
+[package]
+name = "hermit"
+version = "0.1.0"
+edition = "2021"
+description = "A small, fast, memory-efficient coding agent harness"
+license = "MIT"
+repository = "https://github.com/Dhanush-K-Gowda/hermit-code"
+
+[[bin]]
+name = "hermit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+dirs = "5"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+globset = "0.4"
+ignore = "0.4"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "http2"] }
+rustyline = { version = "14", default-features = false, features = ["with-file-history"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = { version = "2", default-features = false, features = ["text"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "time", "signal", "io-util"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
+wiremock = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
