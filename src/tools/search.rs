@@ -7,8 +7,20 @@ use std::path::Path;
 
 const MAX_RESULTS: usize = 300;
 
+/// Build/dependency directories skipped even when there's no .gitignore.
+const SKIP_DIRS: &[&str] = &["target", "node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", ".next"];
+
 fn walker(dir: &Path) -> ignore::Walk {
-    ignore::WalkBuilder::new(dir).hidden(true).git_ignore(true).require_git(false).build()
+    ignore::WalkBuilder::new(dir)
+        .hidden(true)
+        .git_ignore(true)
+        .require_git(false)
+        .filter_entry(|e| {
+            !(e.depth() > 0
+                && e.file_type().is_some_and(|t| t.is_dir())
+                && e.file_name().to_str().is_some_and(|n| SKIP_DIRS.contains(&n)))
+        })
+        .build()
 }
 
 pub fn glob(root: &Path, pattern: &str, path: Option<&str>) -> Result<String> {
@@ -111,6 +123,8 @@ mod tests {
         std::fs::write(root.join(".gitignore"), "target\n").unwrap();
         std::fs::write(root.join("src/lib.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
         std::fs::write(root.join("target/gen.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::write(root.join("node_modules/x/i.rs"), "fn alpha() {}\n").unwrap();
 
         let g = grep(&root, "fn a", None, None, false).unwrap();
         assert_eq!(g.trim(), "src/lib.rs:1: fn alpha() {}");

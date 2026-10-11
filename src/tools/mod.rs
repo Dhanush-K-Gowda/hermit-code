@@ -233,7 +233,7 @@ pub async fn execute(ctx: &mut ToolCtx, name: &str, args: &str) -> String {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("Error: {e:#}");
-            println!("  {}", ui::red(&msg));
+            println!("  {}", ui::red(&format!("└ {msg}")));
             msg
         }
     }
@@ -247,12 +247,14 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
     match tool {
         Tool::ReadFile => {
             let a: ReadArgs = parse(args)?;
-            ui::tool_header("read", &a.path);
-            fs::read_file(&root, &a.path, a.offset, a.limit)
+            ui::tool_header("Read", &a.path);
+            let out = fs::read_file(&root, &a.path, a.offset, a.limit)?;
+            ui::tool_result(&count(&out, "line"));
+            Ok(out)
         }
         Tool::WriteFile => {
             let a: WriteArgs = parse(args)?;
-            ui::tool_header("write", &a.path);
+            ui::tool_header("Write", &a.path);
             ctx.undo.record(&safety::confine(&root, &a.path)?);
             let (rel, old) = fs::write_file(&root, &a.path, &a.content)?;
             ctx.changed = true;
@@ -261,7 +263,7 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
         }
         Tool::EditFile => {
             let a: EditArgs = parse(args)?;
-            ui::tool_header("edit", &a.path);
+            ui::tool_header("Edit", &a.path);
             let p = safety::confine(&root, &a.path)?;
             if p.is_file() {
                 ctx.undo.record(&p);
@@ -274,22 +276,28 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
         Tool::ListDir => {
             let a: PathArg = parse(args)?;
             let p = a.path.as_deref().unwrap_or(".");
-            ui::tool_header("list", p);
-            fs::list_dir(&root, p)
+            ui::tool_header("List", p);
+            let out = fs::list_dir(&root, p)?;
+            ui::tool_result(&count(&out, "entry"));
+            Ok(out)
         }
         Tool::Glob => {
             let a: GlobArgs = parse(args)?;
-            ui::tool_header("glob", &a.pattern);
-            search::glob(&root, &a.pattern, a.path.as_deref())
+            ui::tool_header("Glob", &a.pattern);
+            let out = search::glob(&root, &a.pattern, a.path.as_deref())?;
+            ui::tool_result(&count(&out, "file"));
+            Ok(out)
         }
         Tool::Grep => {
             let a: GrepArgs = parse(args)?;
-            ui::tool_header("grep", &a.pattern);
-            search::grep(&root, &a.pattern, a.path.as_deref(), a.glob.as_deref(), a.ignore_case)
+            ui::tool_header("Grep", &a.pattern);
+            let out = search::grep(&root, &a.pattern, a.path.as_deref(), a.glob.as_deref(), a.ignore_case)?;
+            ui::tool_result(&count(&out, "match"));
+            Ok(out)
         }
         Tool::RunCommand => {
             let a: CmdArgs = parse(args)?;
-            ui::tool_header("run", &format!("$ {}", a.command));
+            ui::tool_header("Run", &a.command);
             if !ctx.yolo && !safety::is_allowed(&a.command, &ctx.allow) {
                 match safety::ask(&a.command) {
                     Approval::Yes => {}
@@ -301,15 +309,35 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
             let out = shell::run(&root, &a.command, timeout, true).await?;
             let status = out.for_model();
             let first = status.lines().next().unwrap_or("");
+            let first = first.trim_matches(['[', ']']);
             if out.success() {
-                println!("  {}", ui::dim(first));
+                ui::tool_result(first);
             } else {
-                println!("  {}", ui::red(first));
+                println!("  {}", ui::red(&format!("└ {first}")));
             }
             // Anything beyond the read/build/test allowlist (sed -i, codegen, …) may have changed files.
             ctx.changed |= !safety::is_allowed(&a.command, &[]);
             Ok(status)
         }
+    }
+}
+
+/// "12 lines", "1 match", "no matches" — a short result summary for the terminal.
+fn count(out: &str, noun: &str) -> String {
+    let first = out.lines().next().unwrap_or("");
+    if first.starts_with("no ") || first.starts_with('(') {
+        return first.trim_matches(['(', ')']).to_string();
+    }
+    let n = out.lines().filter(|l| !l.starts_with('…')).count();
+    let plural = match noun {
+        "entry" => "entries",
+        "match" => "matches",
+        _ => "",
+    };
+    match (n, plural) {
+        (1, _) => format!("1 {noun}"),
+        (_, "") => format!("{n} {noun}s"),
+        (_, p) => format!("{n} {p}"),
     }
 }
 

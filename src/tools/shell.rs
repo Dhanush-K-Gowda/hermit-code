@@ -2,7 +2,6 @@
 
 use crate::context::{CappedBuf, HEAD, TAIL};
 use anyhow::{Context, Result};
-use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -52,7 +51,7 @@ pub async fn run(cwd: &Path, cmd: &str, timeout: Duration, echo: bool) -> Result
 
     let read_all = async {
         let mut chunk = [0u8; 8192];
-        let mut term = std::io::stdout();
+        let mut gutter = crate::ui::Gutter::default();
         loop {
             let n = stdout.read(&mut chunk).await?;
             if n == 0 {
@@ -60,10 +59,10 @@ pub async fn run(cwd: &Path, cmd: &str, timeout: Duration, echo: bool) -> Result
             }
             cap.push(&chunk[..n]);
             if echo {
-                let _ = term.write_all(crate::ui::dim(&String::from_utf8_lossy(&chunk[..n])).as_bytes());
-                let _ = term.flush();
+                gutter.write(&String::from_utf8_lossy(&chunk[..n]));
             }
         }
+        gutter.finish();
         child.wait().await
     };
 

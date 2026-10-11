@@ -7,6 +7,7 @@ use crate::tools::{self, shell, ToolCtx, UndoLog};
 use crate::{ui, verify};
 use anyhow::Result;
 use serde_json::Value;
+use std::cell::Cell;
 use std::future::Future;
 use std::time::Duration;
 
@@ -30,6 +31,8 @@ pub struct Agent {
     tool_defs: Value,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Model requests made this session.
+    pub model_calls: usize,
 }
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(900);
@@ -65,6 +68,7 @@ impl Agent {
             tool_defs: tools::definitions(),
             prompt_tokens: 0,
             completion_tokens: 0,
+            model_calls: 0,
         };
         a.reset();
         Ok(a)
@@ -128,8 +132,9 @@ impl Agent {
         };
         let max = self.settings.max_fix_attempts;
         for attempt in 0..=max {
-            ui::tool_header("verify", &format!("$ {cmd}"));
-            let Some(out) = cancellable(shell::run(&self.settings.root, &cmd, VERIFY_TIMEOUT, false)).await else {
+            ui::tool_header("Verify", &cmd);
+            let run = shell::run(&self.settings.root, &cmd, VERIFY_TIMEOUT, false);
+            let Some(out) = cancellable(ui::spin("running checks", &Cell::new(false), run)).await else {
                 ui::notice("verification cancelled");
                 return Ok(Outcome::Cancelled);
             };
@@ -140,7 +145,7 @@ impl Agent {
             }
             let tail: Vec<&str> = out.output.lines().rev().take(15).collect();
             for l in tail.into_iter().rev() {
-                println!("    {}", ui::dim(l));
+                println!("  {}", ui::dim(&format!("│ {l}")));
             }
             if attempt == max {
                 ui::error(&format!("checks still failing after {max} fix attempts"));
@@ -170,13 +175,18 @@ impl Agent {
             if context::compact(&mut self.messages, self.settings.context_budget_tokens, KEEP_RECENT) {
                 ui::notice("context compacted");
             }
-            let mut printed = false;
+            let started = Cell::new(false);
             let mut on_text = |t: &str| {
+                if !started.get() {
+                    started.set(true);
+                    ui::assistant_start();
+                }
                 ui::stream_text(t);
-                printed = true;
             };
-            let res = cancellable(self.client.chat(&self.messages, &self.tool_defs, &mut on_text)).await;
-            if printed {
+            self.model_calls += 1;
+            let chat = self.client.chat(&self.messages, &self.tool_defs, &mut on_text);
+            let res = cancellable(ui::spin("thinking", &started, chat)).await;
+            if started.get() {
                 println!();
             }
             let Some(res) = res else {

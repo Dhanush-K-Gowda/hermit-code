@@ -69,8 +69,7 @@ async fn run(cli: Cli) -> Result<i32> {
     match cli.prompt {
         Some(p) => {
             hermit::repl::banner(&agent);
-            println!();
-            let outcome = agent.run_turn(&p).await?;
+            let outcome = hermit::repl::turn(&mut agent, &p).await?;
             Ok(match outcome {
                 Outcome::Done | Outcome::Verified => 0,
                 Outcome::Cancelled => 130,

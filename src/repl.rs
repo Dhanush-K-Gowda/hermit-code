@@ -1,10 +1,11 @@
 //! Interactive line-based REPL.
 
-use crate::agent::Agent;
+use crate::agent::{Agent, Outcome};
 use crate::config;
 use crate::ui;
 use anyhow::Result;
 use rustyline::error::ReadlineError;
+use std::time::Instant;
 
 const HELP: &str = "\
 /model [id]   show or switch model
@@ -18,13 +19,9 @@ End a line with \\ to continue on the next line. Ctrl-C cancels a running reques
 
 pub fn banner(agent: &Agent) {
     let s = &agent.settings;
-    println!("{} {}", ui::bold("hermit"), ui::dim(env!("CARGO_PKG_VERSION")));
-    println!("{}", ui::dim(&format!("model   {}", s.model)));
-    println!("{}", ui::dim(&format!("root    {}", s.root.display())));
-    println!(
-        "{}",
-        ui::dim(&format!("verify  {}", agent.verify_cmd().unwrap_or_else(|| "(none detected)".into())))
-    );
+    let verify = agent.verify_cmd().unwrap_or_else(|| ui::dim("none detected"));
+    ui::banner(&[("model", s.model.clone()), ("dir", ui::tilde(&s.root)), ("verify", verify)]);
+    println!();
     if s.yolo {
         ui::notice("yolo mode: commands run without asking");
     }
@@ -33,9 +30,23 @@ pub fn banner(agent: &Agent) {
     }
 }
 
+/// Run one request and print the turn footer.
+pub async fn turn(agent: &mut Agent, input: &str) -> Result<Outcome> {
+    let start = Instant::now();
+    let calls = agent.model_calls;
+    let tokens = agent.prompt_tokens + agent.completion_tokens;
+    let res = agent.run_turn(input).await;
+    ui::footer(
+        agent.model_calls - calls,
+        agent.prompt_tokens + agent.completion_tokens - tokens,
+        start.elapsed(),
+    );
+    res
+}
+
 pub async fn run(agent: &mut Agent) -> Result<()> {
     banner(agent);
-    println!("{}", ui::dim("type /help for commands\n"));
+    println!("{}", ui::dim("  /help for commands · ctrl-c cancels a request\n"));
     let mut rl = rustyline::DefaultEditor::new()?;
     let history = config::config_dir().map(|d| d.join("history"));
     if let Some(h) = &history {
@@ -44,9 +55,9 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
 
     loop {
         let mut input = String::new();
-        let mut prompt = "› ";
+        let mut prompt = "❯ ";
         loop {
-            match rl.readline(&ui::cyan(prompt)) {
+            match rl.readline(&ui::accent(prompt)) {
                 Ok(line) => {
                     if let Some(l) = line.strip_suffix('\\') {
                         input.push_str(l);
@@ -121,7 +132,8 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
             continue;
         }
 
-        if let Err(e) = agent.run_turn(input).await {
+        println!();
+        if let Err(e) = turn(agent, input).await {
             ui::error(&format!("{e:#}"));
         }
         println!();
