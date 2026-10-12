@@ -3,7 +3,7 @@
 A small, fast coding agent written in Rust. It talks to any OpenAI-compatible model, defaulting to **free OpenRouter models**. It reads and edits files, runs shell commands, and **checks that the code works**: after it makes changes, it runs your build and tests, and if they fail it sends the failures back to the model until they pass.
 
 - Single ~4 MB binary, about 4–5 MB peak memory (on a single-threaded tokio runtime)
-- Streams responses, retries with backoff, and falls back to another model when a free one is rate-limited
+- Streams responses and retries with backoff. If a free model stays rate-limited, it switches to a fallback model for the rest of the session
 - Tool output is capped (head and tail are kept). Long conversations are summarized by the model so recent context stays word for word
 - Clean terminal UI: plain ANSI, no TUI framework. Replies stream live and are rendered as Markdown (headings, bold, code blocks, lists)
 - Plan mode: read-only investigation that ends in a plan you approve before anything changes
@@ -61,6 +61,8 @@ hermit --plan -p "how would you add auth?"  # plan only; nothing is changed
 ```
 
 ### In the REPL
+
+Type `/` to see every command as a gray suggestion. Keep typing to narrow it down: `/p` suggests `/plan [task|off]`. Press → or Tab to accept. Tab on `/` lists all commands, and Tab after `/model ` offers your configured models.
 
 | Input | What it does |
 |---|---|
@@ -198,4 +200,5 @@ The end-to-end tests in `tests/agent_e2e.rs` cover:
 | `src/session.rs` | Session save, list and resume |
 | `src/safety.rs` | Workspace confinement and command allowlist |
 | `src/repl.rs`, `src/ui.rs` | REPL commands, plan approval, terminal rendering |
+| `src/complete.rs` | Slash-command table, inline hints and Tab completion |
 | `src/markdown.rs` | Streaming Markdown renderer (redraws each line in place once it completes) |

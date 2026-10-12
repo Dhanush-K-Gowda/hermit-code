@@ -112,6 +112,18 @@ async fn falls_back_to_next_model_when_rate_limited() {
     let outcome = agent.run_turn("hello").await.unwrap();
     assert_eq!(outcome, Outcome::Done);
     assert_eq!(agent.messages.last().unwrap().content.as_deref(), Some("hi from backup"));
+    assert_eq!(agent.client.active_model(), "backup");
+
+    // Sticky: the next turn goes straight to the backup instead of retrying the busy model.
+    let busy_hits = |reqs: &[wiremock::Request]| reqs.iter().filter(|r| String::from_utf8_lossy(&r.body).contains("\"busy\"")).count();
+    let before = busy_hits(&server.received_requests().await.unwrap());
+    assert_eq!(before, 2, "initial try + 1 retry");
+    agent.run_turn("again").await.unwrap();
+    assert_eq!(busy_hits(&server.received_requests().await.unwrap()), before);
+
+    // Switching model resets it.
+    agent.set_model("busy");
+    assert_eq!(agent.client.active_model(), "busy");
 }
 
 fn settings_for(server: &MockServer, root: &std::path::Path) -> Settings {

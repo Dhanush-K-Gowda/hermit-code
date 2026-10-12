@@ -135,7 +135,7 @@ impl Agent {
     }
 
     pub fn set_model(&mut self, model: &str) {
-        self.client.model = model.to_string();
+        self.client.set_model(model);
         self.settings.model = model.to_string();
         self.text_mode = self.settings.tool_mode == ToolMode::Text;
     }

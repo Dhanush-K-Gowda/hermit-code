@@ -1,6 +1,7 @@
 //! Interactive line-based REPL.
 
 use crate::agent::{Agent, Outcome};
+use crate::complete::SlashHelper;
 use crate::config;
 use crate::session::{self, Session};
 use crate::tools::memory;
@@ -9,23 +10,8 @@ use anyhow::Result;
 use rustyline::error::ReadlineError;
 use std::time::{Duration, Instant};
 
-const HELP: &str = "\
-!<command>       run a shell command yourself (output is shared with the model)
-/model [id]      show or switch model
-/models [all]    list free OpenRouter models (with native tool support, or all)
-/todo            show the agent's task list
-/remember <fact> save a note to this project's HERMIT.md
-/memory          show saved memory
-/sessions        list saved sessions for this directory
-/resume [n|id]   resume a session (default: the latest)
-/plan [task|off] read-only planning mode; you approve the plan before any changes
-/compact         summarize older context now
-/undo            revert file changes from the last turn
-/verify          run the project's checks (and fix failures)
-/clear           start a new conversation
-/cost            token usage this session
-/exit            quit
-End a line with \\ to continue on the next line. Ctrl-C cancels a running request.";
+/// Line editor with slash-command hints and completion.
+type Editor = rustyline::Editor<SlashHelper, rustyline::history::FileHistory>;
 
 pub fn banner(agent: &Agent) {
     let s = &agent.settings;
@@ -64,8 +50,12 @@ pub async fn run(agent: &mut Agent, resume_arg: Option<&str>) -> Result<()> {
         resume(agent, r);
         println!();
     }
-    println!("{}", ui::dim("  /help for commands · !cmd runs a shell command · ctrl-c cancels\n"));
-    let mut rl = rustyline::DefaultEditor::new()?;
+    println!("{}", ui::dim("  type / for commands · !cmd runs a shell command · ctrl-c cancels\n"));
+    let cfg = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).build();
+    let mut rl = Editor::with_config(cfg)?;
+    let mut models = vec![agent.settings.model.clone()];
+    models.extend(agent.settings.fallback_models.iter().cloned());
+    rl.set_helper(Some(SlashHelper { models }));
     let history = config::config_dir().map(|d| d.join("history"));
     if let Some(h) = &history {
         let _ = rl.load_history(h);
@@ -126,7 +116,7 @@ pub async fn run(agent: &mut Agent, resume_arg: Option<&str>) -> Result<()> {
             let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
             match name {
                 "exit" | "quit" | "q" => return save(&mut rl, &history),
-                "help" | "h" => println!("{HELP}"),
+                "help" | "h" => println!("{}", crate::complete::help_text()),
                 "clear" => {
                     agent.save_session();
                     agent.reset();
@@ -158,7 +148,14 @@ pub async fn run(agent: &mut Agent, resume_arg: Option<&str>) -> Result<()> {
                         println!("{}", ui::dim("nothing to compact yet"));
                     }
                 }
-                "model" if arg.is_empty() => println!("{}", agent.client.model),
+                "model" if arg.is_empty() => {
+                    let active = agent.client.active_model();
+                    if active == agent.client.model {
+                        println!("{active}");
+                    } else {
+                        println!("{active} {}", ui::dim(&format!("(fallback; {} was busy)", agent.client.model)));
+                    }
+                }
                 "model" => {
                     agent.set_model(arg);
                     println!("{}", ui::dim(&format!("model set to {arg}")));
@@ -306,7 +303,7 @@ fn set_plan(agent: &mut Agent, on: bool) {
 
 /// Run a request. In plan mode, ask for approval afterwards: `y` implements the plan,
 /// `n` keeps planning, anything else is feedback for a revised plan.
-async fn run_input(agent: &mut Agent, rl: &mut rustyline::DefaultEditor, input: &str) {
+async fn run_input(agent: &mut Agent, rl: &mut Editor, input: &str) {
     let mut input = input.to_string();
     loop {
         println!();
@@ -333,7 +330,7 @@ async fn run_input(agent: &mut Agent, rl: &mut rustyline::DefaultEditor, input: 
     }
 }
 
-fn save(rl: &mut rustyline::DefaultEditor, history: &Option<std::path::PathBuf>) -> Result<()> {
+fn save(rl: &mut Editor, history: &Option<std::path::PathBuf>) -> Result<()> {
     if let Some(h) = history {
         if let Some(d) = h.parent() {
             let _ = std::fs::create_dir_all(d);

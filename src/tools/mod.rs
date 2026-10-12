@@ -311,14 +311,14 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
     match tool {
         Tool::ReadFile => {
             let a: ReadArgs = parse(args)?;
-            ui::tool_header("Read", &a.path);
+            ui::tool_header("Read", &shown(&root, &a.path));
             let out = fs::read_file(&root, &a.path, a.offset, a.limit)?;
             ui::tool_result(&count(&out, "line"));
             Ok(out)
         }
         Tool::WriteFile => {
             let a: WriteArgs = parse(args)?;
-            ui::tool_header("Write", &a.path);
+            ui::tool_header("Write", &shown(&root, &a.path));
             ctx.undo.record(&safety::confine(&root, &a.path)?);
             let (rel, old) = fs::write_file(&root, &a.path, &a.content)?;
             ctx.changed = true;
@@ -327,7 +327,7 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
         }
         Tool::EditFile => {
             let a: EditArgs = parse(args)?;
-            ui::tool_header("Edit", &a.path);
+            ui::tool_header("Edit", &shown(&root, &a.path));
             let p = safety::confine(&root, &a.path)?;
             if p.is_file() {
                 ctx.undo.record(&p);
@@ -340,7 +340,7 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
         Tool::ListDir => {
             let a: PathArg = parse(args)?;
             let p = a.path.as_deref().unwrap_or(".");
-            ui::tool_header("List", p);
+            ui::tool_header("List", &shown(&root, p));
             let out = fs::list_dir(&root, p)?;
             ui::tool_result(&count(&out, "entry"));
             Ok(out)
@@ -408,6 +408,15 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
             ctx.changed |= !safety::is_allowed(&a.command, &[]);
             Ok(status)
         }
+    }
+}
+
+/// Path as given by the model, shown relative to the workspace when it's inside it.
+fn shown(root: &Path, p: &str) -> String {
+    match Path::new(p).strip_prefix(root) {
+        Ok(r) if r.as_os_str().is_empty() => ".".into(),
+        Ok(r) => r.display().to_string(),
+        Err(_) => p.to_string(),
     }
 }
 

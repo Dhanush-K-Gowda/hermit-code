@@ -1,7 +1,7 @@
 //! Terminal output: plain ANSI, no dependencies. Colors are disabled when stdout isn't a TTY
 //! or NO_COLOR is set; the spinner only runs on a TTY.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::sync::OnceLock;
@@ -124,6 +124,24 @@ pub fn stream_text(s: &str) {
     let _ = out.flush();
 }
 
+thread_local! {
+    /// Transient status (e.g. rate-limit retries) shown in the spinner instead of its label.
+    static STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Show a transient status line: inside the spinner on a TTY, as a notice otherwise.
+pub fn status(s: &str) {
+    if color() {
+        STATUS.with(|st| *st.borrow_mut() = Some(s.to_string()));
+    } else {
+        notice(s);
+    }
+}
+
+pub fn clear_status() {
+    STATUS.with(|st| *st.borrow_mut() = None);
+}
+
 /// Show a spinner with elapsed time while `fut` runs. It stops drawing once `stop` is set
 /// (e.g. when streamed text starts) and clears its line when `fut` completes.
 pub async fn spin<F: Future>(label: &str, stop: &Cell<bool>, fut: F) -> F::Output {
@@ -140,6 +158,7 @@ pub async fn spin<F: Future>(label: &str, stop: &Cell<bool>, fut: F) -> F::Outpu
         tokio::select! {
             biased;
             r = &mut fut => {
+                clear_status();
                 if drawn && !stop.get() {
                     clear_line();
                 }
@@ -151,7 +170,11 @@ pub async fn spin<F: Future>(label: &str, stop: &Cell<bool>, fut: F) -> F::Outpu
                 }
                 let secs = start.elapsed().as_secs();
                 let time = if secs > 0 { format!(" {secs}s") } else { String::new() };
-                stream_text(&format!("\r\x1b[2K{} {}", accent(FRAMES[frame % FRAMES.len()]), dim(&format!("{label}{time}"))));
+                let text = match STATUS.with(|st| st.borrow().clone()) {
+                    Some(s) => yellow(&s),
+                    None => dim(&format!("{label}{time}")),
+                };
+                stream_text(&format!("\r\x1b[2K{} {text}", accent(FRAMES[frame % FRAMES.len()])));
                 frame += 1;
                 drawn = true;
             }
