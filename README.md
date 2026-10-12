@@ -1,4 +1,8 @@
-# hermit
+<p align="center">
+  <img src="assets/banner.png" alt="hermit code — small, fast coding agent in Rust" width="100%">
+</p>
+
+# hermit code
 
 A small, fast coding agent written in Rust. It talks to any OpenAI-compatible model, defaulting to **free OpenRouter models**. It reads and edits files, runs shell commands, and **checks that the code works**: after it makes changes, it runs your build and tests, and if they fail it sends the failures back to the model until they pass.
 

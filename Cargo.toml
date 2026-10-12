@@ -5,6 +5,7 @@ edition = "2021"
 description = "A small, fast, memory-efficient coding agent harness"
 license = "MIT"
 repository = "https://github.com/Dhanush-K-Gowda/hermit-code"
+exclude = ["assets/"]
 
 [[bin]]
 name = "hermit"
