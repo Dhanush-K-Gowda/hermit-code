@@ -118,12 +118,6 @@ pub fn clear_line() {
     }
 }
 
-/// Marks the start of a model reply.
-pub fn assistant_start() {
-    clear_line();
-    stream_text(&format!("{} ", accent("◆")));
-}
-
 pub fn stream_text(s: &str) {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(s.as_bytes());

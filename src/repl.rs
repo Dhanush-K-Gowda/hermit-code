@@ -18,6 +18,7 @@ const HELP: &str = "\
 /memory          show saved memory
 /sessions        list saved sessions for this directory
 /resume [n|id]   resume a session (default: the latest)
+/plan [task|off] read-only planning mode; you approve the plan before any changes
 /compact         summarize older context now
 /undo            revert file changes from the last turn
 /verify          run the project's checks (and fix failures)
@@ -29,7 +30,11 @@ End a line with \\ to continue on the next line. Ctrl-C cancels a running reques
 pub fn banner(agent: &Agent) {
     let s = &agent.settings;
     let verify = agent.verify_cmd().unwrap_or_else(|| ui::dim("none detected"));
-    ui::banner(&[("model", s.model.clone()), ("dir", ui::tilde(&s.root)), ("verify", verify)]);
+    let mut rows = vec![("model", s.model.clone()), ("dir", ui::tilde(&s.root)), ("verify", verify)];
+    if agent.plan_mode {
+        rows.push(("mode", ui::accent("plan (read-only)")));
+    }
+    ui::banner(&rows);
     println!();
     if s.yolo {
         ui::notice("yolo mode: commands run without asking");
@@ -68,7 +73,7 @@ pub async fn run(agent: &mut Agent, resume_arg: Option<&str>) -> Result<()> {
 
     loop {
         let mut input = String::new();
-        let mut prompt = "❯ ";
+        let mut prompt = if agent.plan_mode { "plan ❯ " } else { "❯ " };
         loop {
             match rl.readline(&ui::accent(prompt)) {
                 Ok(line) => {
@@ -98,6 +103,21 @@ pub async fn run(agent: &mut Agent, resume_arg: Option<&str>) -> Result<()> {
         if let Some(cmd) = input.strip_prefix('!') {
             shell(agent, cmd.trim()).await;
             agent.save_session();
+            println!();
+            continue;
+        }
+
+        if let Some(rest) = input.strip_prefix("/plan").filter(|r| r.is_empty() || r.starts_with(' ')) {
+            match rest.trim() {
+                "off" => set_plan(agent, false),
+                "on" => set_plan(agent, true),
+                "" => set_plan(agent, !agent.plan_mode),
+                task => {
+                    set_plan(agent, true);
+                    run_input(agent, &mut rl, task).await;
+                    agent.save_session();
+                }
+            }
             println!();
             continue;
         }
@@ -179,10 +199,7 @@ pub async fn run(agent: &mut Agent, resume_arg: Option<&str>) -> Result<()> {
             continue;
         }
 
-        println!();
-        if let Err(e) = turn(agent, input).await {
-            ui::error(&format!("{e:#}"));
-        }
+        run_input(agent, &mut rl, input).await;
         agent.save_session();
         println!();
     }
@@ -275,6 +292,44 @@ pub fn resume(agent: &mut Agent, arg: &str) {
             }
         }
         Err(e) => ui::error(&format!("{e:#}")),
+    }
+}
+
+fn set_plan(agent: &mut Agent, on: bool) {
+    agent.set_plan_mode(on);
+    if on {
+        println!("{}", ui::accent("plan mode on: read-only. Describe what you want; you'll approve the plan before any changes."));
+    } else {
+        println!("{}", ui::dim("plan mode off"));
+    }
+}
+
+/// Run a request. In plan mode, ask for approval afterwards: `y` implements the plan,
+/// `n` keeps planning, anything else is feedback for a revised plan.
+async fn run_input(agent: &mut Agent, rl: &mut rustyline::DefaultEditor, input: &str) {
+    let mut input = input.to_string();
+    loop {
+        println!();
+        match turn(agent, &input).await {
+            Err(e) => return ui::error(&format!("{e:#}")),
+            Ok(Outcome::Done) if agent.plan_mode => {}
+            Ok(_) => return,
+        }
+        println!();
+        let question = format!("{} {} ", ui::accent("approve plan?"), ui::dim("[y] implement · [n] keep planning · or type feedback ›"));
+        let answer = rl.readline(&question).map(|l| l.trim().to_string()).unwrap_or_default();
+        match answer.to_ascii_lowercase().as_str() {
+            "y" | "yes" => {
+                agent.set_plan_mode(false);
+                ui::success("plan approved, implementing");
+                input = "The plan is approved. Implement it now, step by step, then verify it works.".into();
+            }
+            "" | "n" | "no" => {
+                println!("{}", ui::dim("staying in plan mode. Keep refining, or /plan off to leave."));
+                return;
+            }
+            _ => input = answer,
+        }
     }
 }
 

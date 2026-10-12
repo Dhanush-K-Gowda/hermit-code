@@ -4,6 +4,7 @@ use crate::config::{Settings, ToolMode};
 use crate::context;
 use crate::llm::text_tools::{self, StreamFilter};
 use crate::llm::{Client, Message, Role, ToolsUnsupported};
+use crate::markdown::Renderer;
 use crate::session::{self, Session};
 use crate::tools::{self, memory, shell, ToolCtx};
 use crate::{ui, verify};
@@ -33,6 +34,10 @@ pub struct Agent {
     pub tools: ToolCtx,
     tool_defs: Value,
     text_instructions: String,
+    plan_defs: Value,
+    plan_text_instructions: String,
+    /// Read-only planning: only read tools are offered and file changes are refused.
+    pub plan_mode: bool,
     /// Send tools as `<tool_call>` text instead of native tool definitions.
     pub text_mode: bool,
     pub prompt_tokens: u64,
@@ -65,8 +70,8 @@ async fn cancellable<F: Future>(f: F) -> Option<F::Output> {
     }
 }
 
-/// Print streamed reply text, adding the reply marker before the first visible text.
-fn show(started: &Cell<bool>, text: &str) {
+/// Print streamed reply text through the Markdown renderer, skipping leading whitespace.
+fn show(started: &Cell<bool>, md: &mut Renderer, text: &str) {
     if text.is_empty() {
         return;
     }
@@ -76,10 +81,10 @@ fn show(started: &Cell<bool>, text: &str) {
             return;
         }
         started.set(true);
-        ui::assistant_start();
-        ui::stream_text(t);
+        ui::clear_line();
+        md.push(t);
     } else {
-        ui::stream_text(text);
+        md.push(text);
     }
 }
 
@@ -97,6 +102,7 @@ impl Agent {
             ..ToolCtx::new(settings.root.clone())
         };
         let tool_defs = tools::definitions();
+        let plan_defs = tools::definitions_for(true);
         let mut a = Agent {
             client,
             text_mode: settings.tool_mode == ToolMode::Text,
@@ -105,6 +111,9 @@ impl Agent {
             tools,
             text_instructions: text_tools::instructions(&tool_defs),
             tool_defs,
+            plan_text_instructions: text_tools::instructions(&plan_defs),
+            plan_defs,
+            plan_mode: false,
             prompt_tokens: 0,
             completion_tokens: 0,
             model_calls: 0,
@@ -129,6 +138,11 @@ impl Agent {
         self.client.model = model.to_string();
         self.settings.model = model.to_string();
         self.text_mode = self.settings.tool_mode == ToolMode::Text;
+    }
+
+    pub fn set_plan_mode(&mut self, on: bool) {
+        self.plan_mode = on;
+        self.tools.plan_mode = on;
     }
 
     pub fn verify_cmd(&self) -> Option<String> {
@@ -221,7 +235,15 @@ impl Agent {
     pub async fn run_turn(&mut self, input: &str) -> Result<Outcome> {
         self.tools.undo.begin_turn();
         self.tools.changed = false;
-        self.messages.push(Message::user(input));
+        if self.plan_mode {
+            self.messages.push(Message::user(format!(
+                "{input}\n\n[Plan mode: investigate with read-only tools only and do not modify anything. \
+                 Finish with a concise, concrete plan: the files to change, what to change in each, and how you will verify it. \
+                 The user will approve the plan before you implement it.]"
+            )));
+        } else {
+            self.messages.push(Message::user(input));
+        }
         let outcome = self.steps().await?;
         if outcome != Outcome::Done || !self.tools.changed || !self.settings.verify {
             return Ok(outcome);
@@ -322,24 +344,28 @@ impl Agent {
         for _ in 0..self.settings.max_steps {
             self.compact(false).await;
 
+            let (defs, instructions) = if self.plan_mode {
+                (&self.plan_defs, &self.plan_text_instructions)
+            } else {
+                (&self.tool_defs, &self.text_instructions)
+            };
             let converted;
             let (msgs, tool_defs) = if self.text_mode {
-                converted = text_tools::to_text_protocol(&self.messages, &self.text_instructions);
+                converted = text_tools::to_text_protocol(&self.messages, instructions);
                 (converted.as_slice(), None)
             } else {
-                (self.messages.as_slice(), Some(&self.tool_defs))
+                (self.messages.as_slice(), Some(defs))
             };
 
             let started = Cell::new(false);
             let mut filter = StreamFilter::default();
-            let mut on_text = |t: &str| show(&started, &filter.push(t));
+            let mut md = Renderer::new();
+            let mut on_text = |t: &str| show(&started, &mut md, &filter.push(t));
             self.model_calls += 1;
             let chat = self.client.chat(msgs, tool_defs, &mut on_text);
             let res = cancellable(ui::spin("thinking", &started, chat)).await;
-            show(&started, &filter.finish());
-            if started.get() {
-                println!();
-            }
+            show(&started, &mut md, &filter.finish());
+            md.finish();
             let Some(res) = res else {
                 ui::notice("cancelled");
                 return Ok(Outcome::Cancelled);

@@ -253,3 +253,48 @@ async fn sessions_save_and_resume() {
     assert_eq!(fresh.tools.todos.len(), 1);
     assert_eq!(hermit::session::list(&sessions, &root)[0].title, "plan the refactor");
 }
+
+#[tokio::test]
+async fn plan_mode_is_read_only_until_approved() {
+    let server = MockServer::start().await;
+    let edit = json!({"path":"calc.txt","old":"2+2=5","new":"2+2=4"});
+    let script = vec![
+        // Planning turn: the model (wrongly) tries to edit, then writes the plan.
+        sse(sse_tool_call("p1", "edit_file", edit.clone())),
+        sse(sse_text("## Plan\n1. Change `2+2=5` to `2+2=4` in calc.txt\n2. Verify with grep")),
+        // Implementation turn after approval.
+        sse(sse_tool_call("i1", "edit_file", edit)),
+        sse(sse_text("Implemented.")),
+    ];
+    for r in script {
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(r).up_to_n_times(1).mount(&server).await;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::write(root.join("calc.txt"), "2+2=5\n").unwrap();
+    let mut s = settings_for(&server, &root);
+    s.verify_cmd = Some("grep -q '2+2=4' calc.txt".into());
+    let mut agent = Agent::new(s).unwrap();
+
+    agent.set_plan_mode(true);
+    let outcome = agent.run_turn("fix the sum").await.unwrap();
+    assert_eq!(outcome, Outcome::Done, "no changes, so no verification in plan mode");
+    assert_eq!(std::fs::read_to_string(root.join("calc.txt")).unwrap(), "2+2=5\n");
+    let refused = agent.messages.iter().find(|m| m.tool_call_id.as_deref() == Some("p1")).unwrap();
+    assert!(refused.content.as_deref().unwrap().contains("plan mode is read-only"));
+
+    let reqs = server.received_requests().await.unwrap();
+    let first: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let names: Vec<&str> = first["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    assert!(!names.contains(&"edit_file") && names.contains(&"read_file"));
+    assert!(first["messages"][1]["content"].as_str().unwrap().contains("[Plan mode"));
+
+    agent.set_plan_mode(false);
+    let outcome = agent.run_turn("The plan is approved. Implement it now.").await.unwrap();
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(std::fs::read_to_string(root.join("calc.txt")).unwrap(), "2+2=4\n");
+    let reqs = server.received_requests().await.unwrap();
+    let impl_req: serde_json::Value = serde_json::from_slice(&reqs[2].body).unwrap();
+    assert_eq!(impl_req["tools"].as_array().unwrap().len(), 9);
+}

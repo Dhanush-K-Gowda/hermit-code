@@ -77,6 +77,12 @@ pub fn is_allowed(cmd: &str, allow: &[String]) -> bool {
         })
 }
 
+/// Commands allowed in plan mode: on the default read/build/test allowlist and not a
+/// formatter or auto-fixer that rewrites files.
+pub fn is_plan_safe(cmd: &str) -> bool {
+    is_allowed(cmd, &[]) && !["fmt", "--fix", "--write", "format"].iter().any(|k| cmd.contains(k))
+}
+
 pub enum Approval {
     Yes,
     No,
@@ -138,5 +144,8 @@ mod tests {
         assert!(!is_allowed("ls && rm x", &extra));
         assert!(!is_allowed("cat a > b", &extra));
         assert!(!is_allowed("echo $(whoami)", &extra));
+        assert!(is_plan_safe("cargo test && git diff"));
+        assert!(!is_plan_safe("cargo fmt"));
+        assert!(!is_plan_safe("make test"));
     }
 }

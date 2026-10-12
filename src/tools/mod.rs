@@ -55,6 +55,11 @@ impl Tool {
         }
     }
 
+    /// Tools that change files; unavailable in plan mode.
+    pub fn mutates(self) -> bool {
+        matches!(self, Tool::WriteFile | Tool::EditFile | Tool::Remember)
+    }
+
     pub fn from_name(n: &str) -> Option<Tool> {
         Tool::ALL.into_iter().find(|t| t.name() == n)
     }
@@ -135,9 +140,15 @@ impl Tool {
 
 /// All tool definitions in OpenAI `tools` format.
 pub fn definitions() -> Value {
+    definitions_for(false)
+}
+
+/// Tool definitions; in plan mode only the read-only tools are offered.
+pub fn definitions_for(plan: bool) -> Value {
     Value::Array(
         Tool::ALL
             .into_iter()
+            .filter(|t| !(plan && t.mutates()))
             .map(|t| {
                 let (desc, params) = t.schema();
                 json!({"type":"function","function":{"name":t.name(),"description":desc,"parameters":params}})
@@ -206,6 +217,8 @@ pub struct ToolCtx {
     pub todos: Vec<todo::Todo>,
     /// Directory for user-scope memory (~/.config/hermit).
     pub user_dir: Option<PathBuf>,
+    /// Read-only mode: file changes are refused, only plan-safe commands run.
+    pub plan_mode: bool,
 }
 
 impl ToolCtx {
@@ -219,6 +232,7 @@ impl ToolCtx {
             changed: false,
             todos: Vec::new(),
             user_dir: None,
+            plan_mode: false,
         }
     }
 }
@@ -290,6 +304,9 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
     let tool = Tool::from_name(name).ok_or_else(|| {
         anyhow!("unknown tool `{name}`. Available: {}", Tool::ALL.map(Tool::name).join(", "))
     })?;
+    if ctx.plan_mode && tool.mutates() {
+        anyhow::bail!("plan mode is read-only: `{name}` is unavailable. Describe the change in your plan instead.");
+    }
     let root = ctx.root.clone();
     match tool {
         Tool::ReadFile => {
@@ -366,6 +383,10 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
         Tool::RunCommand => {
             let a: CmdArgs = parse(args)?;
             ui::tool_header("Run", &a.command);
+            if ctx.plan_mode && !safety::is_plan_safe(&a.command) {
+                ui::tool_result("skipped: not read-only (plan mode)");
+                return Ok("Plan mode is read-only and this command isn't on the read-only allowlist. Describe it in your plan instead.".into());
+            }
             if !ctx.yolo && !safety::is_allowed(&a.command, &ctx.allow) {
                 match safety::ask(&a.command) {
                     Approval::Yes => {}
@@ -455,6 +476,24 @@ mod tests {
         execute(&mut ctx, "remember", r#"{"fact":"prefers tabs","scope":"user"}"#).await;
         assert!(root.join("user/HERMIT.md").exists());
         assert!(!ctx.changed);
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blocks_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let mut ctx = ToolCtx { plan_mode: true, ..ToolCtx::new(root.clone()) };
+        let r = execute(&mut ctx, "write_file", r#"{"path":"a.txt","content":"y"}"#).await;
+        assert!(r.contains("plan mode is read-only"));
+        let r = execute(&mut ctx, "run_command", r#"{"command":"touch b.txt"}"#).await;
+        assert!(r.starts_with("Plan mode is read-only"));
+        assert!(!root.join("b.txt").exists());
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "x");
+        assert!(execute(&mut ctx, "read_file", r#"{"path":"a.txt"}"#).await.contains("x"));
+        let names: Vec<_> = definitions_for(true).as_array().unwrap().iter().map(|d| d["function"]["name"].as_str().unwrap().to_string()).collect();
+        assert!(!names.iter().any(|n| n == "edit_file" || n == "write_file" || n == "remember"));
+        assert!(names.iter().any(|n| n == "todo_write"));
     }
 
     #[tokio::test]

@@ -5,7 +5,8 @@ A small, fast coding agent written in Rust. It talks to any OpenAI-compatible mo
 - Single ~4 MB binary, about 4–5 MB peak memory (on a single-threaded tokio runtime)
 - Streams responses, retries with backoff, and falls back to another model when a free one is rate-limited
 - Tool output is capped (head and tail are kept). Long conversations are summarized by the model so recent context stays word for word
-- Clean terminal UI: plain ANSI, no TUI framework
+- Clean terminal UI: plain ANSI, no TUI framework. Replies stream live and are rendered as Markdown (headings, bold, code blocks, lists)
+- Plan mode: read-only investigation that ends in a plan you approve before anything changes
 - Plans multi-step work with a live todo list, remembers project facts in `HERMIT.md`, and saves every session so you can resume it
 - Works with models that lack native tool calling (it switches to text-based tool calls automatically)
 
@@ -56,6 +57,7 @@ hermit --no-verify
 hermit -c                                # continue the latest session in this directory
 hermit --resume 1760234512-a1b2          # resume a specific session
 hermit --text-tools -m some/model:free   # force text-based tool calls
+hermit --plan -p "how would you add auth?"  # plan only; nothing is changed
 ```
 
 ### In the REPL
@@ -66,6 +68,7 @@ hermit --text-tools -m some/model:free   # force text-based tool calls
 | `!git status` | Run a shell command yourself. No approval prompt; the output is added to the conversation so the model can see it |
 | `/model [id]` | Show or switch the model |
 | `/models [all]` | List current free OpenRouter models: those with native tool calling, or `all` |
+| `/plan [task\|off]` | Plan mode: read-only, ends with a plan to approve (see below) |
 | `/todo` | Show the agent's task list |
 | `/remember <fact>` | Save a note to this project's `HERMIT.md` |
 | `/memory` | Show saved project and user memory |
@@ -103,6 +106,20 @@ When a turn changed files, hermit runs a check command:
 If the check fails, the output goes back to the model, up to `max_fix_attempts` times.
 
 ## Planning, memory and sessions
+
+**Plan mode.** Run `/plan` to toggle it, or `/plan <task>` to start straight away. The prompt changes to `plan ❯`. In plan mode:
+- the model only gets read-only tools (read, list, glob, grep, todo)
+- file writes and edits are refused, even if a text-mode model tries them anyway
+- only read-only commands from the allowlist can run, so no formatters or `--fix`
+
+The model investigates and ends with a concrete plan: the files to change, the changes, and how it will verify them. Then you're asked:
+
+```
+approve plan? [y] implement · [n] keep planning · or type feedback ›
+```
+
+`y` leaves plan mode and implements the plan, then the usual verify-and-fix loop runs. `n` stays in plan mode. Typing anything else sends it as feedback, and the model revises the plan. `hermit --plan -p "..."` prints a plan and exits; continue later with `hermit -c -p "go ahead"`.
+
 
 **Todo list.** For multi-step tasks, the model writes a checklist with `todo_write` and updates it as it works:
 
@@ -170,6 +187,7 @@ The end-to-end tests in `tests/agent_e2e.rs` cover:
 - the automatic switch to text-based tool calls
 - context summarization
 - saving and resuming a session
+- plan mode refusing edits until approval
 
 | Module | Role |
 |---|---|
@@ -179,4 +197,5 @@ The end-to-end tests in `tests/agent_e2e.rs` cover:
 | `src/context.rs` | Output capping, token estimates, summary split |
 | `src/session.rs` | Session save, list and resume |
 | `src/safety.rs` | Workspace confinement and command allowlist |
-| `src/repl.rs`, `src/ui.rs` | REPL commands and terminal rendering |
+| `src/repl.rs`, `src/ui.rs` | REPL commands, plan approval, terminal rendering |
+| `src/markdown.rs` | Streaming Markdown renderer (redraws each line in place once it completes) |

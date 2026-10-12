@@ -38,6 +38,9 @@ struct Cli {
     /// Use text-based tool calls (for models without native tool support)
     #[arg(long)]
     text_tools: bool,
+    /// Start in plan mode: read-only investigation that ends with a plan to approve
+    #[arg(long)]
+    plan: bool,
 }
 
 fn main() {
@@ -78,6 +81,7 @@ async fn run(cli: Cli) -> Result<i32> {
     }
 
     let mut agent = Agent::new(s)?;
+    agent.set_plan_mode(cli.plan);
     let resume_arg = cli.resume.or(cli.continue_last.then(String::new));
     match cli.prompt {
         Some(p) => {
@@ -88,6 +92,9 @@ async fn run(cli: Cli) -> Result<i32> {
             let outcome = hermit::repl::turn(&mut agent, &p).await;
             agent.save_session();
             let outcome = outcome?;
+            if agent.plan_mode && outcome == Outcome::Done {
+                println!("{}", hermit::ui::dim("plan only, nothing changed. To implement it: hermit -c -p \"go ahead\""));
+            }
             Ok(match outcome {
                 Outcome::Done | Outcome::Verified => 0,
                 Outcome::Cancelled => 130,
