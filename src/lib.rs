@@ -4,6 +4,7 @@ pub mod context;
 pub mod llm;
 pub mod repl;
 pub mod safety;
+pub mod session;
 pub mod tools;
 pub mod ui;
 pub mod verify;

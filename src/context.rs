@@ -104,6 +104,50 @@ pub fn compact(messages: &mut [Message], budget: usize, keep_recent: usize) -> b
     true
 }
 
+/// Where to split history for summarization: messages `[1..split]` get summarized and
+/// `[split..]` (roughly the last `keep_tokens`) are kept verbatim. The split never lands on a
+/// `tool` message, so every kept tool result still follows the call that produced it.
+pub fn summary_split(messages: &[Message], keep_tokens: usize) -> Option<usize> {
+    if messages.len() < 4 {
+        return None;
+    }
+    let mut acc = 0;
+    let mut split = messages.len();
+    while split > 1 && acc < keep_tokens {
+        split -= 1;
+        acc += messages[split].char_len() / 4;
+    }
+    while split < messages.len() && messages[split].role == Role::Tool {
+        split += 1;
+    }
+    // Need at least two old messages to be worth a model call, and something left to keep.
+    (split > 2 && split < messages.len()).then_some(split)
+}
+
+/// Render messages as a compact transcript for the summarizer, bounded to `max_chars`.
+pub fn transcript(messages: &[Message], max_chars: usize) -> String {
+    let mut out = String::new();
+    for m in messages {
+        let who = match m.role {
+            Role::System => continue,
+            Role::User => "USER",
+            Role::Assistant => "ASSISTANT",
+            Role::Tool => "TOOL RESULT",
+        };
+        let limit = if m.role == Role::Tool { 1500 } else { 6000 };
+        out.push_str(&format!("### {who}\n"));
+        if let Some(c) = &m.content {
+            out.push_str(&truncate_middle(c, limit / 2, limit / 2));
+            out.push('\n');
+        }
+        for c in &m.tool_calls {
+            out.push_str(&format!("[called {} {}]\n", c.function.name, truncate_middle(&c.function.arguments, 600, 200)));
+        }
+        out.push('\n');
+    }
+    truncate_middle(&out, max_chars / 3, max_chars * 2 / 3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +190,30 @@ mod tests {
         assert!(compact(&mut msgs, 500, 1));
         assert!(msgs[2].content.as_ref().unwrap().starts_with("[old tool output elided"));
         assert!(estimate_tokens(&msgs) <= 500);
+    }
+
+    #[test]
+    fn summary_split_skips_tool_messages() {
+        let mut msgs = vec![Message::system("s"), Message::user("a".repeat(4000))];
+        msgs.push(Message::user("b".repeat(4000)));
+        let mut call = Message::user("");
+        call.role = Role::Assistant;
+        call.content = None;
+        call.tool_calls.push(crate::llm::ToolCall {
+            id: "1".into(),
+            kind: "function".into(),
+            function: crate::llm::types::FunctionCall { name: "read_file".into(), arguments: "{}".into() },
+        });
+        msgs.push(call);
+        msgs.push(Message::tool("1", "c".repeat(400)));
+        msgs.push(Message::tool("1", "d".repeat(400)));
+        // Keeping ~150 tokens lands inside the tool results; the split must move past them.
+        let split = summary_split(&msgs, 150);
+        assert!(split.is_none_or(|s| msgs[s].role != Role::Tool));
+        let split = summary_split(&msgs, 210).unwrap();
+        assert_eq!(msgs[split].role, Role::Assistant);
+        let t = transcript(&msgs[1..split], 10_000);
+        assert!(t.contains("### USER"));
+        assert!(!t.contains("### TOOL"));
     }
 }

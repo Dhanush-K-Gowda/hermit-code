@@ -29,6 +29,15 @@ struct Cli {
     /// Max model calls per request
     #[arg(long)]
     max_steps: Option<usize>,
+    /// Continue the most recent session in this directory
+    #[arg(short = 'c', long = "continue")]
+    continue_last: bool,
+    /// Resume a saved session by id (see /sessions)
+    #[arg(long, value_name = "ID")]
+    resume: Option<String>,
+    /// Use text-based tool calls (for models without native tool support)
+    #[arg(long)]
+    text_tools: bool,
 }
 
 fn main() {
@@ -64,12 +73,21 @@ async fn run(cli: Cli) -> Result<i32> {
         s.max_steps = n;
     }
     s.yolo = cli.yolo;
+    if cli.text_tools {
+        s.tool_mode = hermit::config::ToolMode::Text;
+    }
 
     let mut agent = Agent::new(s)?;
+    let resume_arg = cli.resume.or(cli.continue_last.then(String::new));
     match cli.prompt {
         Some(p) => {
             hermit::repl::banner(&agent);
-            let outcome = hermit::repl::turn(&mut agent, &p).await?;
+            if let Some(r) = &resume_arg {
+                hermit::repl::resume(&mut agent, r);
+            }
+            let outcome = hermit::repl::turn(&mut agent, &p).await;
+            agent.save_session();
+            let outcome = outcome?;
             Ok(match outcome {
                 Outcome::Done | Outcome::Verified => 0,
                 Outcome::Cancelled => 130,
@@ -77,7 +95,7 @@ async fn run(cli: Cli) -> Result<i32> {
             })
         }
         None => {
-            hermit::repl::run(&mut agent).await?;
+            hermit::repl::run(&mut agent, resume_arg.as_deref()).await?;
             Ok(0)
         }
     }

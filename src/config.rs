@@ -29,6 +29,8 @@ pub struct FileConfig {
     pub command_timeout_secs: Option<u64>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// "auto" (default), "native" or "text".
+    pub tool_mode: Option<String>,
 }
 
 impl FileConfig {
@@ -37,9 +39,31 @@ impl FileConfig {
             ($($f:ident),*) => { $( if o.$f.is_some() { self.$f = o.$f; } )* };
         }
         take!(base_url, api_key, api_key_env, model, fallback_models, verify_cmd, verify, max_steps,
-              max_fix_attempts, context_budget_tokens, command_timeout_secs, temperature, max_tokens);
+              max_fix_attempts, context_budget_tokens, command_timeout_secs, temperature, max_tokens, tool_mode);
         self.allow_commands.extend(o.allow_commands);
         self
+    }
+}
+
+/// How tools are offered to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMode {
+    /// Native tool calling; switch to text automatically if the model rejects it.
+    Auto,
+    Native,
+    /// `<tool_call>` blocks in plain text, for models without native support.
+    Text,
+}
+
+impl std::str::FromStr for ToolMode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "auto" => Ok(ToolMode::Auto),
+            "native" => Ok(ToolMode::Native),
+            "text" => Ok(ToolMode::Text),
+            _ => anyhow::bail!("tool_mode must be auto, native or text (got `{s}`)"),
+        }
     }
 }
 
@@ -59,6 +83,7 @@ pub struct Settings {
     pub command_timeout_secs: u64,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    pub tool_mode: ToolMode,
     pub yolo: bool,
 }
 
@@ -105,6 +130,7 @@ impl Settings {
             command_timeout_secs: fc.command_timeout_secs.unwrap_or(120),
             temperature: fc.temperature,
             max_tokens: fc.max_tokens,
+            tool_mode: fc.tool_mode.as_deref().unwrap_or("auto").parse()?,
             yolo: false,
         })
     }

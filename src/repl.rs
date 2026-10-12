@@ -2,20 +2,28 @@
 
 use crate::agent::{Agent, Outcome};
 use crate::config;
+use crate::session::{self, Session};
+use crate::tools::memory;
 use crate::ui;
 use anyhow::Result;
 use rustyline::error::ReadlineError;
 use std::time::{Duration, Instant};
 
 const HELP: &str = "\
-!<command>    run a shell command yourself (output is shared with the model)
-/model [id]   show or switch model
-/models       list free OpenRouter models with tool support
-/undo         revert file changes from the last turn
-/verify       run the project's checks (and fix failures)
-/clear        start a new conversation
-/cost         token usage this session
-/exit         quit
+!<command>       run a shell command yourself (output is shared with the model)
+/model [id]      show or switch model
+/models [all]    list free OpenRouter models (with native tool support, or all)
+/todo            show the agent's task list
+/remember <fact> save a note to this project's HERMIT.md
+/memory          show saved memory
+/sessions        list saved sessions for this directory
+/resume [n|id]   resume a session (default: the latest)
+/compact         summarize older context now
+/undo            revert file changes from the last turn
+/verify          run the project's checks (and fix failures)
+/clear           start a new conversation
+/cost            token usage this session
+/exit            quit
 End a line with \\ to continue on the next line. Ctrl-C cancels a running request.";
 
 pub fn banner(agent: &Agent) {
@@ -45,8 +53,12 @@ pub async fn turn(agent: &mut Agent, input: &str) -> Result<Outcome> {
     res
 }
 
-pub async fn run(agent: &mut Agent) -> Result<()> {
+pub async fn run(agent: &mut Agent, resume_arg: Option<&str>) -> Result<()> {
     banner(agent);
+    if let Some(r) = resume_arg {
+        resume(agent, r);
+        println!();
+    }
     println!("{}", ui::dim("  /help for commands · !cmd runs a shell command · ctrl-c cancels\n"));
     let mut rl = rustyline::DefaultEditor::new()?;
     let history = config::config_dir().map(|d| d.join("history"));
@@ -85,6 +97,7 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
 
         if let Some(cmd) = input.strip_prefix('!') {
             shell(agent, cmd.trim()).await;
+            agent.save_session();
             println!();
             continue;
         }
@@ -95,16 +108,42 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
                 "exit" | "quit" | "q" => return save(&mut rl, &history),
                 "help" | "h" => println!("{HELP}"),
                 "clear" => {
+                    agent.save_session();
                     agent.reset();
-                    println!("{}", ui::dim("conversation cleared"));
+                    println!("{}", ui::dim("new conversation started"));
+                }
+                "todo" | "todos" => {
+                    ui::tool_header("Todo", &crate::tools::todo::progress(&agent.tools.todos));
+                    crate::tools::todo::render(&agent.tools.todos);
+                }
+                "remember" if arg.is_empty() => ui::error("usage: /remember <fact>"),
+                "remember" => {
+                    let path = agent.settings.root.join(memory::FILE);
+                    match memory::remember(&path, arg) {
+                        Ok(true) => {
+                            ui::success(&format!("saved to {}", memory::FILE));
+                            agent.messages.push(crate::llm::Message::user(format!("(Note: I saved this to project memory: {arg})")));
+                        }
+                        Ok(false) => println!("{}", ui::dim("already remembered")),
+                        Err(e) => ui::error(&format!("{e:#}")),
+                    }
+                }
+                "memory" => show_memory(agent),
+                "sessions" => list_sessions(agent),
+                "resume" => resume(agent, arg),
+                "compact" => {
+                    let before = crate::context::estimate_tokens(&agent.messages);
+                    agent.compact(true).await;
+                    if crate::context::estimate_tokens(&agent.messages) >= before {
+                        println!("{}", ui::dim("nothing to compact yet"));
+                    }
                 }
                 "model" if arg.is_empty() => println!("{}", agent.client.model),
                 "model" => {
-                    agent.client.model = arg.to_string();
-                    agent.settings.model = arg.to_string();
+                    agent.set_model(arg);
                     println!("{}", ui::dim(&format!("model set to {arg}")));
                 }
-                "models" => match agent.client.list_free_tool_models().await {
+                "models" => match agent.client.list_free_models(arg != "all").await {
                     Ok(ms) => ms.iter().for_each(|m| println!("  {m}")),
                     Err(e) => ui::error(&format!("{e:#}")),
                 },
@@ -136,6 +175,7 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
                 ),
                 _ => ui::error(&format!("unknown command /{name} (try /help)")),
             }
+            agent.save_session();
             continue;
         }
 
@@ -143,6 +183,7 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
         if let Err(e) = turn(agent, input).await {
             ui::error(&format!("{e:#}"));
         }
+        agent.save_session();
         println!();
     }
 }
@@ -181,6 +222,61 @@ async fn shell(agent: &mut Agent, cmd: &str) {
 
 /// Long enough for builds; Ctrl-C stops it sooner.
 const USER_CMD_TIMEOUT: Duration = Duration::from_secs(1800);
+
+fn show_memory(agent: &Agent) {
+    let mut any = false;
+    let user = config::config_dir().map(|d| d.join(memory::FILE));
+    for (label, path) in [("user", user), ("project", Some(agent.settings.root.join(memory::FILE)))] {
+        let Some(path) = path else { continue };
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            any = true;
+            println!("{} {}", ui::accent("●"), ui::bold(&format!("{label} memory")) + &ui::dim(&format!(" {}", ui::tilde(&path))));
+            for l in s.lines().filter(|l| l.starts_with("- ")) {
+                println!("  {l}");
+            }
+        }
+    }
+    if !any {
+        println!("{}", ui::dim("no memory saved yet — use /remember <fact>, or the agent will save useful facts itself"));
+    }
+}
+
+fn list_sessions(agent: &Agent) {
+    let Some(dir) = &agent.sessions_dir else { return };
+    let list = session::list(dir, &agent.settings.root);
+    if list.is_empty() {
+        println!("{}", ui::dim("no saved sessions for this directory"));
+        return;
+    }
+    for (i, m) in list.iter().take(15).enumerate() {
+        let current = if m.id == agent.session_id { ui::accent(" ← current") } else { String::new() };
+        println!("  {} {}  {}{}", ui::dim(&format!("{:>2}.", i + 1)), m.title, ui::dim(&format!("{} · {}", session::age(m.updated), m.id)), current);
+    }
+    println!("{}", ui::dim("  /resume <n> to continue one"));
+}
+
+/// Load a saved session into the agent and show a short recap.
+pub fn resume(agent: &mut Agent, arg: &str) {
+    let Some(dir) = agent.sessions_dir.clone() else { return };
+    let loaded = session::resolve(&dir, &agent.settings.root, arg).and_then(|id| Session::load(&dir, &id));
+    match loaded {
+        Ok(s) => {
+            agent.save_session();
+            let title = s.title.clone();
+            let n = s.messages.len();
+            agent.resume(s);
+            ui::success(&format!("resumed “{title}” ({n} messages)"));
+            if let Some(last) = agent.messages.iter().rev().find(|m| m.role == crate::llm::Role::Assistant).and_then(|m| m.content.as_deref()) {
+                let snippet: String = last.chars().take(300).collect();
+                println!("  {}", ui::dim(&format!("last reply: {}", snippet.replace('\n', " "))));
+            }
+            if !agent.tools.todos.is_empty() {
+                crate::tools::todo::render(&agent.tools.todos);
+            }
+        }
+        Err(e) => ui::error(&format!("{e:#}")),
+    }
+}
 
 fn save(rl: &mut rustyline::DefaultEditor, history: &Option<std::path::PathBuf>) -> Result<()> {
     if let Some(h) = history {

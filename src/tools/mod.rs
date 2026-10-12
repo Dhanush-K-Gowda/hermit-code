@@ -1,8 +1,10 @@
 //! Tool registry: static enum dispatch, JSON schemas, and undo snapshots.
 
 pub mod fs;
+pub mod memory;
 pub mod search;
 pub mod shell;
+pub mod todo;
 
 use crate::safety::{self, Approval};
 use crate::ui;
@@ -22,10 +24,12 @@ pub enum Tool {
     Glob,
     Grep,
     RunCommand,
+    TodoWrite,
+    Remember,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 7] = [
+    pub const ALL: [Tool; 9] = [
         Tool::ReadFile,
         Tool::WriteFile,
         Tool::EditFile,
@@ -33,6 +37,8 @@ impl Tool {
         Tool::Glob,
         Tool::Grep,
         Tool::RunCommand,
+        Tool::TodoWrite,
+        Tool::Remember,
     ];
 
     pub fn name(self) -> &'static str {
@@ -44,6 +50,8 @@ impl Tool {
             Tool::Glob => "glob",
             Tool::Grep => "grep",
             Tool::RunCommand => "run_command",
+            Tool::TodoWrite => "todo_write",
+            Tool::Remember => "remember",
         }
     }
 
@@ -104,6 +112,22 @@ impl Tool {
                     "command":{"type":"string"},
                     "timeout_secs":{"type":"integer","description":"Default 120"}},
                     "required":["command"]}),
+            ),
+            Tool::TodoWrite => (
+                "Create or update your task checklist for multi-step work. Send the FULL list each time (it replaces the previous one). Keep exactly one item in_progress while working, and mark items completed as soon as they're done.",
+                json!({"type":"object","properties":{
+                    "todos":{"type":"array","items":{"type":"object","properties":{
+                        "content":{"type":"string","description":"Short imperative description"},
+                        "status":{"type":"string","enum":["pending","in_progress","completed"]}},
+                        "required":["content","status"]}}},
+                    "required":["todos"]}),
+            ),
+            Tool::Remember => (
+                "Save a durable fact for future sessions (build/test commands, conventions, gotchas, user preferences). One short sentence. Don't save task-specific or temporary details.",
+                json!({"type":"object","properties":{
+                    "fact":{"type":"string"},
+                    "scope":{"type":"string","enum":["project","user"],"description":"project (default): this repo's HERMIT.md. user: preferences that apply to every project."}},
+                    "required":["fact"]}),
             ),
         }
     }
@@ -179,6 +203,24 @@ pub struct ToolCtx {
     pub undo: UndoLog,
     /// Set when a tool modified files during the current turn.
     pub changed: bool,
+    pub todos: Vec<todo::Todo>,
+    /// Directory for user-scope memory (~/.config/hermit).
+    pub user_dir: Option<PathBuf>,
+}
+
+impl ToolCtx {
+    pub fn new(root: PathBuf) -> Self {
+        ToolCtx {
+            root,
+            yolo: false,
+            allow: Vec::new(),
+            command_timeout: Duration::from_secs(120),
+            undo: UndoLog::default(),
+            changed: false,
+            todos: Vec::new(),
+            user_dir: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -216,6 +258,11 @@ struct GrepArgs {
     glob: Option<String>,
     #[serde(default)]
     ignore_case: bool,
+}
+#[derive(Deserialize)]
+struct RememberArgs {
+    fact: String,
+    scope: Option<String>,
 }
 #[derive(Deserialize)]
 struct CmdArgs {
@@ -295,6 +342,27 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
             ui::tool_result(&count(&out, "match"));
             Ok(out)
         }
+        Tool::TodoWrite => {
+            let v: Value = parse(args)?;
+            ctx.todos = todo::parse(&v)?;
+            ui::tool_header("Todo", &todo::progress(&ctx.todos));
+            todo::render(&ctx.todos);
+            Ok(todo::for_model(&ctx.todos))
+        }
+        Tool::Remember => {
+            let a: RememberArgs = parse(args)?;
+            ui::tool_header("Remember", &a.fact);
+            let (path, label) = match a.scope.as_deref() {
+                Some("user") => match &ctx.user_dir {
+                    Some(d) => (d.join(memory::FILE), format!("~/.config/hermit/{}", memory::FILE)),
+                    None => anyhow::bail!("no user config directory available"),
+                },
+                _ => (root.join(memory::FILE), memory::FILE.to_string()),
+            };
+            let added = memory::remember(&path, &a.fact)?;
+            ui::tool_result(&if added { format!("saved to {label}") } else { "already remembered".into() });
+            Ok(if added { format!("Saved to {label}.") } else { "Already in memory.".into() })
+        }
         Tool::RunCommand => {
             let a: CmdArgs = parse(args)?;
             ui::tool_header("Run", &a.command);
@@ -359,14 +427,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().canonicalize().unwrap();
         std::fs::write(root.join("a.txt"), "orig").unwrap();
-        let mut ctx = ToolCtx {
-            root: root.clone(),
-            yolo: true,
-            allow: vec![],
-            command_timeout: Duration::from_secs(5),
-            undo: UndoLog::default(),
-            changed: false,
-        };
+        let mut ctx = ToolCtx { yolo: true, ..ToolCtx::new(root.clone()) };
         ctx.undo.begin_turn();
         execute(&mut ctx, "edit_file", r#"{"path":"a.txt","old":"orig","new":"changed"}"#).await;
         execute(&mut ctx, "write_file", r#"{"path":"b.txt","content":"new"}"#).await;
@@ -379,16 +440,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn todo_and_remember_tools() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let mut ctx = ToolCtx { user_dir: Some(root.join("user")), ..ToolCtx::new(root.clone()) };
+        let r = execute(&mut ctx, "todo_write", r#"{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}"#).await;
+        assert!(r.starts_with("Todo list saved (1/2"), "{r}");
+        assert_eq!(ctx.todos.len(), 2);
+        assert!(!ctx.changed);
+
+        let r = execute(&mut ctx, "remember", r#"{"fact":"tests: cargo test -q"}"#).await;
+        assert_eq!(r, "Saved to HERMIT.md.");
+        assert!(std::fs::read_to_string(root.join("HERMIT.md")).unwrap().contains("- tests: cargo test -q"));
+        execute(&mut ctx, "remember", r#"{"fact":"prefers tabs","scope":"user"}"#).await;
+        assert!(root.join("user/HERMIT.md").exists());
+        assert!(!ctx.changed);
+    }
+
+    #[tokio::test]
     async fn bad_args_return_error_text() {
         let d = tempfile::tempdir().unwrap();
-        let mut ctx = ToolCtx {
-            root: d.path().canonicalize().unwrap(),
-            yolo: true,
-            allow: vec![],
-            command_timeout: Duration::from_secs(5),
-            undo: UndoLog::default(),
-            changed: false,
-        };
+        let mut ctx = ToolCtx { yolo: true, ..ToolCtx::new(d.path().canonicalize().unwrap()) };
         assert!(execute(&mut ctx, "read_file", "not json").await.starts_with("Error: invalid arguments"));
         assert!(execute(&mut ctx, "nope", "{}").await.starts_with("Error: unknown tool"));
     }

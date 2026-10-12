@@ -48,7 +48,7 @@ impl Client {
     pub async fn chat(
         &self,
         messages: &[Message],
-        tools: &Value,
+        tools: Option<&Value>,
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Completion> {
         let models = std::iter::once(&self.model).chain(self.fallback_models.iter());
@@ -70,7 +70,7 @@ impl Client {
         &self,
         model: &str,
         messages: &[Message],
-        tools: &Value,
+        tools: Option<&Value>,
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Completion> {
         let mut body = json!({
@@ -79,7 +79,7 @@ impl Client {
             "stream": true,
             "stream_options": { "include_usage": true },
         });
-        if tools.as_array().is_some_and(|t| !t.is_empty()) {
+        if let Some(tools) = tools.filter(|t| t.as_array().is_some_and(|a| !a.is_empty())) {
             body["tools"] = tools.clone();
             body["tool_choice"] = json!("auto");
         }
@@ -113,6 +113,10 @@ impl Client {
             let retryable = status.is_none_or(|s| s.as_u16() == 429 || s.is_server_error());
             if !retryable {
                 let text = res.unwrap().text().await.unwrap_or_default();
+                let code = status.unwrap().as_u16();
+                if tools.is_some() && super::text_tools::is_tools_unsupported(code, &text) {
+                    return Err(anyhow!(ToolsUnsupported(model.to_string())));
+                }
                 bail!("{} from {model}: {}", status.unwrap(), short(&text));
             }
             attempt += 1;
@@ -148,8 +152,8 @@ impl Client {
         Ok(Completion { message: acc.into_message(), usage, model: model.to_string() })
     }
 
-    /// List free models on OpenRouter that support tool calling.
-    pub async fn list_free_tool_models(&self) -> Result<Vec<String>> {
+    /// List free models on OpenRouter; with `tools_only`, only those with native tool calling.
+    pub async fn list_free_models(&self, tools_only: bool) -> Result<Vec<String>> {
         let v: Value = self.http.get(format!("{}/models", self.base_url)).send().await?.json().await?;
         let mut out: Vec<String> = v["data"]
             .as_array()
@@ -157,9 +161,10 @@ impl Client {
                 a.iter()
                     .filter(|m| {
                         m["id"].as_str().is_some_and(|id| id.ends_with(":free"))
-                            && m["supported_parameters"]
-                                .as_array()
-                                .is_some_and(|p| p.iter().any(|x| x == "tools"))
+                            && (!tools_only
+                                || m["supported_parameters"]
+                                    .as_array()
+                                    .is_some_and(|p| p.iter().any(|x| x == "tools")))
                     })
                     .filter_map(|m| m["id"].as_str().map(String::from))
                     .collect()
@@ -169,6 +174,16 @@ impl Client {
         Ok(out)
     }
 }
+
+/// The model rejected native tool definitions; switch to text-based tool calls.
+#[derive(Debug)]
+pub struct ToolsUnsupported(pub String);
+impl std::fmt::Display for ToolsUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} does not support native tool calling", self.0)
+    }
+}
+impl std::error::Error for ToolsUnsupported {}
 
 /// Marker error: this model failed transiently, try the next one.
 #[derive(Debug)]

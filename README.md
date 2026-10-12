@@ -2,10 +2,12 @@
 
 A small, fast coding agent written in Rust. It talks to any OpenAI-compatible model, defaulting to **free OpenRouter models**. It reads and edits files, runs shell commands, and **checks that the code works**: after it makes changes, it runs your build and tests, and if they fail it sends the failures back to the model until they pass.
 
-- Single 4 MB binary, about 4–5 MB peak memory (on a single-threaded tokio runtime)
+- Single ~4 MB binary, about 4–5 MB peak memory (on a single-threaded tokio runtime)
 - Streams responses, retries with backoff, and falls back to another model when a free one is rate-limited
-- Tool output is capped (head and tail are kept), and old context is compacted automatically
+- Tool output is capped (head and tail are kept). Long conversations are summarized by the model so recent context stays word for word
 - Clean terminal UI: plain ANSI, no TUI framework
+- Plans multi-step work with a live todo list, remembers project facts in `HERMIT.md`, and saves every session so you can resume it
+- Works with models that lack native tool calling (it switches to text-based tool calls automatically)
 
 ```
   █ █ █▀▀ █▀█ █▀▄▀█ █ ▀█▀  v0.1.0
@@ -51,6 +53,9 @@ hermit -C ../other-repo -m google/gemma-4-31b-it:free
 hermit --yolo -p "..."                   # never ask before running commands
 hermit --verify "make lint test" -p "..."
 hermit --no-verify
+hermit -c                                # continue the latest session in this directory
+hermit --resume 1760234512-a1b2          # resume a specific session
+hermit --text-tools -m some/model:free   # force text-based tool calls
 ```
 
 ### In the REPL
@@ -60,10 +65,16 @@ hermit --no-verify
 | `fix the login bug` | Send a request to the agent |
 | `!git status` | Run a shell command yourself. No approval prompt; the output is added to the conversation so the model can see it |
 | `/model [id]` | Show or switch the model |
-| `/models` | List the current free OpenRouter models that support tool calling |
+| `/models [all]` | List current free OpenRouter models: those with native tool calling, or `all` |
+| `/todo` | Show the agent's task list |
+| `/remember <fact>` | Save a note to this project's `HERMIT.md` |
+| `/memory` | Show saved project and user memory |
+| `/sessions` | List saved sessions for this directory |
+| `/resume [n\|id]` | Resume a session (default: the latest) |
+| `/compact` | Summarize older context now |
 | `/undo` | Revert file changes from the last turn |
 | `/verify` | Run the project's checks, and have the model fix failures |
-| `/clear` | Start a new conversation |
+| `/clear` | Start a new conversation (the current one stays saved) |
 | `/cost` | Token usage this session |
 | `/exit` | Quit (Ctrl-D also works) |
 
@@ -71,7 +82,7 @@ End a line with `\` to continue on the next line. Ctrl-C cancels the running req
 
 ## Tools the model gets
 
-`read_file`, `write_file`, `edit_file` (exact, unique string replace), `list_dir`, `glob`, `grep` (both respect `.gitignore`), `run_command`.
+`read_file`, `write_file`, `edit_file` (exact, unique string replace), `list_dir`, `glob`, `grep` (both respect `.gitignore`), `run_command`, `todo_write` (task checklist), and `remember` (project memory).
 
 - Every path is confined to the workspace, and `..` or symlink escapes are rejected.
 - File edits apply immediately and are shown as diffs. `/undo` reverts the last turn.
@@ -91,6 +102,25 @@ When a turn changed files, hermit runs a check command:
 
 If the check fails, the output goes back to the model, up to `max_fix_attempts` times.
 
+## Planning, memory and sessions
+
+**Todo list.** For multi-step tasks, the model writes a checklist with `todo_write` and updates it as it works:
+
+```
+● Todo 1/3
+  ✓ Find where totals are computed
+  ▸ Fix rounding in src/cart.rs
+  ○ Add a regression test
+```
+
+**Project memory.** When the model learns something durable, such as how to run tests, a project convention or a gotcha, it saves it with `remember`. You can also add notes yourself with `/remember`. Notes go to `HERMIT.md` in the project, or to `~/.config/hermit/HERMIT.md` for preferences that apply everywhere. Both files are loaded into every new session, along with `AGENTS.md` or `CLAUDE.md` if the project has one. `HERMIT.md` is plain Markdown, so you can edit it or commit it.
+
+**Sessions.** Every conversation is saved to `~/.config/hermit/sessions/` after each turn, including its todo list. The 100 most recent are kept. Resume with `hermit -c`, `hermit --resume <id>`, or `/sessions` and `/resume` in the REPL.
+
+**Context compaction.** When the conversation goes over `context_budget_tokens`, the model writes a summary of the older turns (goal, changes so far, key findings, current state, next steps). That summary replaces the older turns, and the most recent turns are kept word for word. If summarizing fails, hermit trims old tool output instead. Run `/compact` to do it by hand.
+
+**Text-based tool calling.** Some models, including many free ones, don't support native tool calling. When a model rejects tools, hermit switches automatically to `<tool_call>{json}</tool_call>` blocks in plain text and hides them from the streamed output. Conversation history is stored in a single format, so switching models or modes mid-session keeps working. To force a mode, use `--text-tools` or `tool_mode = "text"`.
+
 ## Config
 
 Settings are loaded in this order, each one overriding the previous: `~/.config/hermit/config.toml`, then `./.hermit.toml`, then env vars (`HERMIT_API_KEY` or `OPENROUTER_API_KEY`, `HERMIT_MODEL`, `HERMIT_BASE_URL`), then CLI flags.
@@ -104,17 +134,49 @@ max_steps = 40
 max_fix_attempts = 3
 context_budget_tokens = 60000
 command_timeout_secs = 120
+tool_mode = "auto"                 # auto | native | text
 
 # Any OpenAI-compatible provider works, e.g. local Ollama:
 # base_url = "http://localhost:11434/v1"
 # model = "qwen3-coder"
 ```
 
-If a `HERMIT.md`, `AGENTS.md` or `CLAUDE.md` file exists in the workspace root, it's added to the system prompt.
+The system prompt also includes, when they exist: user memory (`~/.config/hermit/HERMIT.md`), project memory (`./HERMIT.md`), and the first of `AGENTS.md` or `CLAUDE.md`. Each is capped at 8 KB.
+
+## Files hermit uses
+
+| Path | What |
+|---|---|
+| `~/.config/hermit/config.toml` | User config |
+| `~/.config/hermit/HERMIT.md` | User memory (preferences for every project) |
+| `~/.config/hermit/sessions/*.json` | Saved conversations (latest 100) |
+| `~/.config/hermit/history` | REPL input history |
+| `./.hermit.toml` | Per-project config |
+| `./HERMIT.md` | Project memory; worth committing so teammates get it too |
+
+`$XDG_CONFIG_HOME` is used instead of `~/.config` when it's set.
 
 ## Development
 
 ```sh
-cargo test     # unit tests, plus an end-to-end test against a mock model server
+cargo test                  # unit tests + end-to-end tests against a mock model server
 cargo clippy --all-targets
+cargo build --release       # optimized binary in target/release/hermit
 ```
+
+The end-to-end tests in `tests/agent_e2e.rs` cover:
+- a full edit → verify → fix loop
+- retry and model fallback
+- the automatic switch to text-based tool calls
+- context summarization
+- saving and resuming a session
+
+| Module | Role |
+|---|---|
+| `src/agent.rs` | Agent loop, verify-and-fix, compaction, sessions |
+| `src/llm/` | Streaming client, SSE parsing, text-based tool protocol |
+| `src/tools/` | File, search, shell, todo and memory tools |
+| `src/context.rs` | Output capping, token estimates, summary split |
+| `src/session.rs` | Session save, list and resume |
+| `src/safety.rs` | Workspace confinement and command allowlist |
+| `src/repl.rs`, `src/ui.rs` | REPL commands and terminal rendering |
