@@ -5,9 +5,10 @@ use crate::config;
 use crate::ui;
 use anyhow::Result;
 use rustyline::error::ReadlineError;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const HELP: &str = "\
+!<command>    run a shell command yourself (output is shared with the model)
 /model [id]   show or switch model
 /models       list free OpenRouter models with tool support
 /undo         revert file changes from the last turn
@@ -46,7 +47,7 @@ pub async fn turn(agent: &mut Agent, input: &str) -> Result<Outcome> {
 
 pub async fn run(agent: &mut Agent) -> Result<()> {
     banner(agent);
-    println!("{}", ui::dim("  /help for commands · ctrl-c cancels a request\n"));
+    println!("{}", ui::dim("  /help for commands · !cmd runs a shell command · ctrl-c cancels\n"));
     let mut rl = rustyline::DefaultEditor::new()?;
     let history = config::config_dir().map(|d| d.join("history"));
     if let Some(h) = &history {
@@ -81,6 +82,12 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
             continue;
         }
         let _ = rl.add_history_entry(input);
+
+        if let Some(cmd) = input.strip_prefix('!') {
+            shell(agent, cmd.trim()).await;
+            println!();
+            continue;
+        }
 
         if let Some(cmd) = input.strip_prefix('/') {
             let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
@@ -139,6 +146,41 @@ pub async fn run(agent: &mut Agent) -> Result<()> {
         println!();
     }
 }
+
+/// `!cmd`: run a command the user typed. No approval needed; output goes into the
+/// conversation so the model can see it on the next turn.
+async fn shell(agent: &mut Agent, cmd: &str) {
+    if cmd.is_empty() {
+        return;
+    }
+    ui::tool_header("Shell", cmd);
+    let run = crate::tools::shell::run(&agent.settings.root, cmd, USER_CMD_TIMEOUT, true);
+    let out = tokio::select! {
+        r = run => r,
+        _ = tokio::signal::ctrl_c() => {
+            ui::notice("command cancelled");
+            return;
+        }
+    };
+    match out {
+        Ok(o) => {
+            let status = o.for_model();
+            let first = status.lines().next().unwrap_or("").trim_matches(['[', ']']);
+            if o.success() {
+                ui::tool_result(first);
+            } else {
+                println!("  {}", ui::red(&format!("└ {first}")));
+            }
+            agent.messages.push(crate::llm::Message::user(format!(
+                "(For context, I ran `{cmd}` in the workspace myself. No action needed unless I ask.)\n{status}"
+            )));
+        }
+        Err(e) => ui::error(&format!("{e:#}")),
+    }
+}
+
+/// Long enough for builds; Ctrl-C stops it sooner.
+const USER_CMD_TIMEOUT: Duration = Duration::from_secs(1800);
 
 fn save(rl: &mut rustyline::DefaultEditor, history: &Option<std::path::PathBuf>) -> Result<()> {
     if let Some(h) = history {

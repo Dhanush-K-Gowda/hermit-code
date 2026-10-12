@@ -2,17 +2,45 @@
 
 A small, fast coding agent written in Rust. It talks to any OpenAI-compatible model, defaulting to **free OpenRouter models**. It reads and edits files, runs shell commands, and **checks that the code works**: after it makes changes, it runs your build and tests, and if they fail it sends the failures back to the model until they pass.
 
-- Single 4 MB binary, about 5 MB peak memory (on a single-threaded tokio runtime)
+- Single 4 MB binary, about 4–5 MB peak memory (on a single-threaded tokio runtime)
 - Streams responses, retries with backoff, and falls back to another model when a free one is rate-limited
 - Tool output is capped (head and tail are kept), and old context is compacted automatically
+- Clean terminal UI: plain ANSI, no TUI framework
 
-## Setup
+```
+  █ █ █▀▀ █▀█ █▀▄▀█ █ ▀█▀  v0.1.0
+  █▀█ ██▄ █▀▄ █ ▀ █ █  █   small, fast coding agent
+
+  model   poolside/laguna-s-2.1:free
+  dir     ~/repos/demo
+  verify  cargo check --all-targets --quiet && cargo test --quiet
+
+❯ fix the failing test
+
+● Grep fn add
+  └ 1 match
+● Edit src/lib.rs
+  └ src/lib.rs +1 -1
+    -pub fn add(a: i32, b: i32) -> i32 { a - b }
+    +pub fn add(a: i32, b: i32) -> i32 { a + b }
+● Run cargo test --quiet
+  │ test result: ok. 1 passed; 0 failed
+  └ exit code 0
+◆ Fixed `add`: it subtracted instead of adding. Tests pass.
+● Verify cargo check --all-targets --quiet && cargo test --quiet
+  ✓ checks passed
+── 5 steps · 876 tokens · 8.9s
+```
+
+## Install
 
 ```sh
-curl https://sh.rustup.rs -sSf | sh       # if Rust isn't installed
-cargo install --path .                    # or: cargo build --release
-export OPENROUTER_API_KEY=sk-or-...       # free key: https://openrouter.ai/keys
+curl https://sh.rustup.rs -sSf | sh                                  # if Rust isn't installed
+cargo install --git https://github.com/Dhanush-K-Gowda/hermit-code   # or, from a clone: cargo install --path .
+export OPENROUTER_API_KEY=sk-or-...                                  # free key: https://openrouter.ai/keys
 ```
+
+`cargo build` only updates `target/release/`. To update the installed `hermit`, re-run the install command with `--force`.
 
 ## Usage
 
@@ -25,7 +53,21 @@ hermit --verify "make lint test" -p "..."
 hermit --no-verify
 ```
 
-REPL commands: `/model [id]`, `/models` (lists current free models that support tool calling), `/undo`, `/verify`, `/clear`, `/cost`, `/exit`. Ctrl-C cancels the running request or command.
+### In the REPL
+
+| Input | What it does |
+|---|---|
+| `fix the login bug` | Send a request to the agent |
+| `!git status` | Run a shell command yourself. No approval prompt; the output is added to the conversation so the model can see it |
+| `/model [id]` | Show or switch the model |
+| `/models` | List the current free OpenRouter models that support tool calling |
+| `/undo` | Revert file changes from the last turn |
+| `/verify` | Run the project's checks, and have the model fix failures |
+| `/clear` | Start a new conversation |
+| `/cost` | Token usage this session |
+| `/exit` | Quit (Ctrl-D also works) |
+
+End a line with `\` to continue on the next line. Ctrl-C cancels the running request or command. `!` commands are non-interactive (no `vim` or `top`), and `!cd` doesn't carry over to the next command.
 
 ## Tools the model gets
 
