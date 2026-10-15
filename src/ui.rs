@@ -196,12 +196,54 @@ pub fn success(s: &str) {
     println!("  {}", green(&format!("✓ {s}")));
 }
 
+thread_local! {
+    /// Set while a sub-agent runs: its tool activity is shown as compact nested lines.
+    static NESTED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn nested() -> bool {
+    NESTED.with(Cell::get)
+}
+
+/// Show tool activity as nested lines until the guard is dropped.
+pub struct NestedGuard;
+
+impl NestedGuard {
+    pub fn enter() -> Self {
+        NESTED.with(|n| n.set(true));
+        NestedGuard
+    }
+}
+
+impl Drop for NestedGuard {
+    fn drop(&mut self) {
+        NESTED.with(|n| n.set(false));
+    }
+}
+
 pub fn tool_header(verb: &str, summary: &str) {
+    if nested() {
+        let line: String = format!("│ {verb} {summary}").chars().take(100).collect();
+        println!("  {}", dim(&line));
+        return;
+    }
     println!("{} {} {}", accent("●"), bold(verb), dim(summary));
 }
 
 pub fn tool_result(s: &str) {
+    if nested() {
+        return;
+    }
     println!("  {}", dim(&format!("└ {s}")));
+}
+
+pub fn tool_error(s: &str) {
+    let line: String = s.chars().take(160).collect();
+    if nested() {
+        println!("  {}", dim(&format!("│   ✗ {line}")));
+    } else {
+        println!("  {}", red(&format!("└ {line}")));
+    }
 }
 
 /// Prefixes each line of streamed command output with a dim gutter.
@@ -212,6 +254,9 @@ pub struct Gutter {
 
 impl Gutter {
     pub fn write(&mut self, chunk: &str) {
+        if nested() {
+            return;
+        }
         let mut out = String::with_capacity(chunk.len() + 32);
         for line in chunk.split_inclusive('\n') {
             if !self.mid_line {
@@ -252,6 +297,9 @@ pub fn footer(steps: usize, tokens: u64, elapsed: Duration) {
 /// Print a colored unified diff, capped at `MAX_LINES` lines.
 pub fn diff(path: &str, old: &str, new: &str) {
     const MAX_LINES: usize = 120;
+    if nested() {
+        return;
+    }
     let d = similar::TextDiff::from_lines(old, new);
     let (mut adds, mut dels) = (0, 0);
     for op in d.ops() {

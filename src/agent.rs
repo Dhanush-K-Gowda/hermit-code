@@ -6,7 +6,7 @@ use crate::llm::text_tools::{self, StreamFilter};
 use crate::llm::{Client, Message, Role, ToolsUnsupported};
 use crate::markdown::Renderer;
 use crate::session::{self, Session};
-use crate::tools::{self, memory, shell, ToolCtx};
+use crate::tools::{self, memory, shell, Tool, ToolCtx};
 use crate::{ui, verify};
 use anyhow::Result;
 use serde_json::Value;
@@ -36,6 +36,9 @@ pub struct Agent {
     text_instructions: String,
     plan_defs: Value,
     plan_text_instructions: String,
+    /// Read-only research tools given to `explore` sub-agents.
+    explore_defs: Value,
+    explore_text_instructions: String,
     /// Read-only planning: only read tools are offered and file changes are refused.
     pub plan_mode: bool,
     /// Send tools as `<tool_call>` text instead of native tool definitions.
@@ -61,6 +64,35 @@ Findings: exact paths, function names, commands, error messages and decisions th
 State: what currently works or fails.\n\
 Next: remaining steps.\n\
 Use only facts from the transcript. No preamble.";
+
+const EXPLORE: &str = "explore";
+const EXPLORE_MAX_STEPS: usize = 25;
+const EXPLORE_REPORT_CAP: usize = 12 * 1024;
+
+fn explore_definition() -> Value {
+    serde_json::json!({"type":"function","function":{
+        "name": EXPLORE,
+        "description": "Delegate a read-only investigation to a sub-agent with its own context window. Use it for broad searches across many files: finding where something is implemented, tracing how a flow works, or listing what a change would affect. Your context stays small because only its report comes back. Give a specific, self-contained task and say what to report. Don't use it for a single file you already know; read that directly.",
+        "parameters": {"type":"object","properties":{
+            "task": {"type":"string","description":"What to investigate and what to report back. The sub-agent sees only this text."},
+            "description": {"type":"string","description":"Short 3-6 word label shown to the user"}},
+            "required": ["task"]}}})
+}
+
+/// Turn `<tool_call>` blocks in reply text into real tool calls (text mode, or a native-mode
+/// model that wrote its calls as text anyway).
+fn absorb_text_calls(msg: &mut Message, id_prefix: &str) {
+    if !msg.tool_calls.is_empty() {
+        return;
+    }
+    if let Some(content) = msg.content.as_deref().filter(|c| c.contains("<tool_call>")) {
+        let (text, calls) = text_tools::parse(content, id_prefix);
+        if !calls.is_empty() {
+            msg.content = (!text.is_empty()).then_some(text);
+            msg.tool_calls = calls;
+        }
+    }
+}
 
 /// Run `f` unless Ctrl-C arrives first.
 async fn cancellable<F: Future>(f: F) -> Option<F::Output> {
@@ -101,8 +133,14 @@ impl Agent {
             user_dir: crate::config::config_dir(),
             ..ToolCtx::new(settings.root.clone())
         };
-        let tool_defs = tools::definitions();
-        let plan_defs = tools::definitions_for(true);
+        let mut tool_defs = tools::definitions();
+        let mut plan_defs = tools::definitions_for(true);
+        for defs in [&mut tool_defs, &mut plan_defs] {
+            if let Some(a) = defs.as_array_mut() {
+                a.push(explore_definition());
+            }
+        }
+        let explore_defs = tools::definitions_where(|t| !t.mutates() && t != Tool::TodoWrite);
         let mut a = Agent {
             client,
             text_mode: settings.tool_mode == ToolMode::Text,
@@ -113,6 +151,8 @@ impl Agent {
             tool_defs,
             plan_text_instructions: text_tools::instructions(&plan_defs),
             plan_defs,
+            explore_text_instructions: text_tools::instructions(&explore_defs),
+            explore_defs,
             plan_mode: false,
             prompt_tokens: 0,
             completion_tokens: 0,
@@ -160,6 +200,7 @@ impl Agent {
              Workspace root: {root}\nOS: {os}\n\n\
              How to work:\n\
              - Explore with list_dir, glob, grep and read_file before changing code. Never guess file contents.\n\
+             - For broad or open-ended investigation across many files (unfamiliar code, \"where/how is X done\", what a change would affect), delegate to the explore tool and work from its report. This keeps your context small. Read files directly when you already know which ones matter.\n\
              - For tasks with 3+ steps, plan with todo_write first. Keep exactly one item in_progress and update the list as you finish items.\n\
              - Make focused changes with edit_file (exact, unique `old` text copied from read_file output, without the line-number prefix). Use write_file only for new files or full rewrites.\n\
              - Use run_command to build, test and inspect. Commands must be non-interactive.\n\
@@ -339,6 +380,112 @@ impl Agent {
         }
     }
 
+    fn explore_prompt(&self) -> String {
+        format!(
+            "You are a read-only research sub-agent helping a coding agent.\n\
+             Workspace root: {root}\nOS: {os}\n\n\
+             Investigate the task you're given with list_dir, glob, grep, read_file and read-only run_command. You cannot modify anything.\n\
+             - Search first (grep, glob), then read only the relevant parts of files (use offset/limit for big files).\n\
+             - Be efficient and stop as soon as you can answer.\n\
+             - Your final reply (with no tool calls) is the only thing the main agent sees. Make it a self-contained report: \
+             the direct answer first, then key file paths with line numbers, short relevant code excerpts, and anything you're unsure about. \
+             Keep it under 500 words.\n",
+            root = self.settings.root.display(),
+            os = std::env::consts::OS,
+        )
+    }
+
+    /// Run an `explore` sub-agent: a separate, read-only conversation whose final report is
+    /// returned as the tool result. Returns None if the user cancelled.
+    async fn explore(&mut self, args: &str) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            task: String,
+            description: Option<String>,
+        }
+        let a: Args = match serde_json::from_str(args) {
+            Ok(a) => a,
+            Err(e) => {
+                let msg = format!("Error: invalid arguments: {e}. Expected {{\"task\": \"...\"}}.");
+                ui::tool_error(&msg);
+                return Some(msg);
+            }
+        };
+        let label = a
+            .description
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| a.task.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(70).collect());
+        ui::tool_header("Explore", &label);
+
+        let mut ctx = ToolCtx {
+            plan_mode: true,
+            command_timeout: self.tools.command_timeout,
+            ..ToolCtx::new(self.settings.root.clone())
+        };
+        let mut msgs = vec![Message::system(self.explore_prompt()), Message::user(a.task)];
+        let mut steps = 0;
+        let report = loop {
+            let final_round = steps >= EXPLORE_MAX_STEPS;
+            if final_round {
+                msgs.push(Message::user("You've reached the step limit. Reply now with your report based on what you found, without calling tools."));
+            }
+            context::compact(&mut msgs, self.settings.context_budget_tokens / 2, 6);
+            let converted;
+            let (m, defs) = if self.text_mode {
+                converted = text_tools::to_text_protocol(&msgs, &self.explore_text_instructions);
+                (converted.as_slice(), None)
+            } else {
+                (msgs.as_slice(), Some(&self.explore_defs))
+            };
+            self.model_calls += 1;
+            let mut quiet = |_: &str| {};
+            let spin_label = format!("exploring · step {}", steps + 1);
+            let chat = self.client.chat(m, defs, &mut quiet);
+            let c = match cancellable(ui::spin(&spin_label, &Cell::new(false), chat)).await? {
+                Ok(c) => c,
+                Err(e) if e.is::<ToolsUnsupported>() && self.settings.tool_mode == ToolMode::Auto && !self.text_mode => {
+                    ui::notice(&format!("{e} — switching to text-based tool calls"));
+                    self.text_mode = true;
+                    continue;
+                }
+                Err(e) => {
+                    let msg = format!("Error: the explore sub-agent failed: {e:#}");
+                    ui::tool_error(&msg);
+                    return Some(msg);
+                }
+            };
+            if let Some(u) = c.usage {
+                self.prompt_tokens += u.prompt_tokens;
+                self.completion_tokens += u.completion_tokens;
+            }
+            let mut msg = c.message;
+            absorb_text_calls(&mut msg, &format!("x{}_", self.model_calls));
+            steps += 1;
+            if msg.tool_calls.is_empty() || final_round {
+                break msg.content.unwrap_or_default();
+            }
+            let calls = msg.tool_calls.clone();
+            msgs.push(msg);
+            let _nested = ui::NestedGuard::enter();
+            for call in &calls {
+                let out = cancellable(tools::execute(&mut ctx, &call.function.name, &call.function.arguments)).await?;
+                msgs.push(Message::tool(&call.id, out));
+            }
+        };
+
+        let report = report.trim();
+        if report.is_empty() {
+            ui::tool_error("the sub-agent finished without a report");
+            return Some("The explore sub-agent finished without a report. Investigate directly instead.".into());
+        }
+        let kb = report.len() as f64 / 1024.0;
+        ui::tool_result(&format!("{steps} step{} · {kb:.1}k chars report", if steps == 1 { "" } else { "s" }));
+        Some(format!(
+            "Sub-agent report ({steps} steps):\n{}",
+            context::truncate_middle(report, EXPLORE_REPORT_CAP * 2 / 3, EXPLORE_REPORT_CAP / 3)
+        ))
+    }
+
     /// Model ↔ tool loop until the model stops calling tools.
     async fn steps(&mut self) -> Result<Outcome> {
         for _ in 0..self.settings.max_steps {
@@ -384,16 +531,7 @@ impl Agent {
                 self.completion_tokens += u.completion_tokens;
             }
             let mut msg = c.message;
-            // Text-mode calls, or a native-mode model that wrote tool calls as text anyway.
-            if msg.tool_calls.is_empty() {
-                if let Some(content) = msg.content.as_deref().filter(|c| c.contains("<tool_call>")) {
-                    let (text, calls) = text_tools::parse(content, &format!("t{}_", self.model_calls));
-                    if !calls.is_empty() {
-                        msg.content = (!text.is_empty()).then_some(text);
-                        msg.tool_calls = calls;
-                    }
-                }
-            }
+            absorb_text_calls(&mut msg, &format!("t{}_", self.model_calls));
             if msg.content.as_deref().is_none_or(|c| c.trim().is_empty()) && msg.tool_calls.is_empty() {
                 ui::notice(&format!("{} returned an empty response", c.model));
                 return Ok(Outcome::Done);
@@ -404,7 +542,11 @@ impl Agent {
                 return Ok(Outcome::Done);
             }
             for (i, call) in calls.iter().enumerate() {
-                let r = cancellable(tools::execute(&mut self.tools, &call.function.name, &call.function.arguments)).await;
+                let r = if call.function.name == EXPLORE {
+                    self.explore(&call.function.arguments).await
+                } else {
+                    cancellable(tools::execute(&mut self.tools, &call.function.name, &call.function.arguments)).await
+                };
                 match r {
                     Some(out) => self.messages.push(Message::tool(&call.id, out)),
                     None => {

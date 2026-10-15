@@ -80,7 +80,7 @@ async fn edits_then_fixes_until_verification_passes() {
     assert_eq!(reqs.len(), 6);
     let last: serde_json::Value = serde_json::from_slice(&reqs[5].body).unwrap();
     assert_eq!(last["model"], "mock-model");
-    assert_eq!(last["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(last["tools"].as_array().unwrap().len(), 10);
     assert!(last["stream"].as_bool().unwrap());
 
     // /undo reverts the whole turn.
@@ -308,5 +308,71 @@ async fn plan_mode_is_read_only_until_approved() {
     assert_eq!(std::fs::read_to_string(root.join("calc.txt")).unwrap(), "2+2=4\n");
     let reqs = server.received_requests().await.unwrap();
     let impl_req: serde_json::Value = serde_json::from_slice(&reqs[2].body).unwrap();
-    assert_eq!(impl_req["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(impl_req["tools"].as_array().unwrap().len(), 10);
+}
+
+#[tokio::test]
+async fn main_agent_delegates_to_explore_subagent() {
+    let server = MockServer::start().await;
+    let main_agent = || wiremock::matchers::body_string_contains("You are hermit, an autonomous coding agent");
+    let sub_agent = || wiremock::matchers::body_string_contains("read-only research sub-agent");
+
+    // Main agent: delegates, then answers from the report.
+    let main_script = vec![
+        sse(sse_tool_call("m1", "explore", json!({"task":"Find where tokens are validated and report the file and line.","description":"find token validation"}))),
+        sse(sse_text("Tokens are validated in src/auth.rs.")),
+    ];
+    for r in main_script {
+        Mock::given(method("POST")).and(main_agent()).respond_with(r).up_to_n_times(1).mount(&server).await;
+    }
+    // Sub-agent: grep, read, try an edit (refused), then report.
+    let sub_script = vec![
+        sse(sse_tool_call("s1", "grep", json!({"pattern":"fn validate_token"}))),
+        sse(sse_tool_call("s2", "read_file", json!({"path":"src/auth.rs"}))),
+        sse(sse_tool_call("s3", "edit_file", json!({"path":"src/auth.rs","old":"true","new":"false"}))),
+        sse(sse_text("`validate_token` is defined in src/auth.rs:2 and returns true for non-empty tokens.")),
+    ];
+    for r in sub_script {
+        Mock::given(method("POST")).and(sub_agent()).respond_with(r).up_to_n_times(1).mount(&server).await;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let code = "// auth\npub fn validate_token(t: &str) -> bool { !t.is_empty() && true }\n";
+    std::fs::write(root.join("src/auth.rs"), code).unwrap();
+    let mut agent = Agent::new(settings_for(&server, &root)).unwrap();
+
+    let outcome = agent.run_turn("where are tokens validated?").await.unwrap();
+    assert_eq!(outcome, Outcome::Done);
+    assert_eq!(std::fs::read_to_string(root.join("src/auth.rs")).unwrap(), code, "sub-agent must not edit");
+
+    // Main context holds only the report, not the sub-agent's file reads.
+    let report = agent.messages.iter().find(|m| m.tool_call_id.as_deref() == Some("m1")).unwrap();
+    let report = report.content.as_deref().unwrap();
+    assert!(report.starts_with("Sub-agent report (4 steps):"));
+    assert!(report.contains("src/auth.rs:2"));
+    assert!(!agent.messages.iter().any(|m| m.content.as_deref().is_some_and(|c| c.contains("!t.is_empty()"))));
+    assert_eq!(agent.messages.last().unwrap().content.as_deref(), Some("Tokens are validated in src/auth.rs."));
+    assert_eq!(agent.model_calls, 6);
+
+    // The sub-agent got read-only tools only, and its own conversation.
+    let reqs = server.received_requests().await.unwrap();
+    let sub: Vec<serde_json::Value> = reqs
+        .iter()
+        .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+        .filter(|b| b["messages"][0]["content"].as_str().unwrap().contains("research sub-agent"))
+        .collect();
+    assert_eq!(sub.len(), 4);
+    let names: Vec<&str> = sub[0]["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"grep") && names.contains(&"read_file"));
+    for banned in ["edit_file", "write_file", "remember", "todo_write", "explore"] {
+        assert!(!names.contains(&banned), "{banned} offered to sub-agent");
+    }
+    assert_eq!(sub[0]["messages"][1]["content"], "Find where tokens are validated and report the file and line.");
+    let refused = sub[3]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == "s3").unwrap();
+    assert!(refused["content"].as_str().unwrap().contains("read-only"));
+    // The main agent offers explore.
+    let main_first: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert!(main_first["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "explore"));
 }

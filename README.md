@@ -11,6 +11,7 @@ A small, fast coding agent written in Rust. It talks to any OpenAI-compatible mo
 - Tool output is capped (head and tail are kept). Long conversations are summarized by the model so recent context stays word for word
 - Clean terminal UI: plain ANSI, no TUI framework. Replies stream live and are rendered as Markdown (headings, bold, code blocks, lists)
 - Plan mode: read-only investigation that ends in a plan you approve before anything changes
+- Sub-agents: the model hands broad codebase searches to a read-only `explore` helper with its own context, so the main conversation stays small
 - Plans multi-step work with a live todo list, remembers project facts in `HERMIT.md`, and saves every session so you can resume it
 - Works with models that lack native tool calling (it switches to text-based tool calls automatically)
 
@@ -91,7 +92,7 @@ End a line with `\` to continue on the next line. Ctrl-C cancels the running req
 
 ## Tools the model gets
 
-`read_file`, `write_file`, `edit_file` (exact, unique string replace), `list_dir`, `glob`, `grep` (both respect `.gitignore`), `run_command`, `todo_write` (task checklist), and `remember` (project memory).
+`read_file`, `write_file`, `edit_file` (exact, unique string replace), `list_dir`, `glob`, `grep` (both respect `.gitignore`), `run_command`, `todo_write` (task checklist), `remember` (project memory), and `explore` (read-only sub-agent).
 
 - Every path is confined to the workspace, and `..` or symlink escapes are rejected.
 - File edits apply immediately and are shown as diffs. `/undo` reverts the last turn.
@@ -126,6 +127,21 @@ approve plan? [y] implement · [n] keep planning · or type feedback ›
 
 `y` leaves plan mode and implements the plan, then the usual verify-and-fix loop runs. `n` stays in plan mode. Typing anything else sends it as feedback, and the model revises the plan. `hermit --plan -p "..."` prints a plan and exits; continue later with `hermit -c -p "go ahead"`.
 
+
+**Sub-agents (`explore`).** For broad questions like "where is auth handled?", "how does a request flow through this?" or "what would this change touch?", the model can start an `explore` sub-agent on its own:
+- the sub-agent gets a fresh context window and only read-only tools (read, list, glob, grep, and read-only commands)
+- it can't edit files, write todos, save memory, or start more sub-agents
+- only its final report, capped at 12 KB, goes back into the main conversation, so large searches don't fill your context
+- it stops after 25 steps (when it reaches the limit, it's asked to report what it found)
+- it works in plan mode and with text-based tool calls
+- Ctrl-C cancels it
+
+```
+● Explore find token validation
+  │ Grep validate_token
+  │ Read src/auth.rs
+  └ 3 steps · 0.1k chars report
+```
 
 **Todo list.** For multi-step tasks, the model writes a checklist with `todo_write` and updates it as it works:
 
@@ -194,6 +210,7 @@ The end-to-end tests in `tests/agent_e2e.rs` cover:
 - context summarization
 - saving and resuming a session
 - plan mode refusing edits until approval
+- the main agent delegating to an `explore` sub-agent (read-only tools, only the report returned)
 
 | Module | Role |
 |---|---|

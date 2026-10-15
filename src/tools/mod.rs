@@ -145,10 +145,15 @@ pub fn definitions() -> Value {
 
 /// Tool definitions; in plan mode only the read-only tools are offered.
 pub fn definitions_for(plan: bool) -> Value {
+    definitions_where(|t| !(plan && t.mutates()))
+}
+
+/// Definitions for the tools that pass `keep`.
+pub fn definitions_where(keep: impl Fn(Tool) -> bool) -> Value {
     Value::Array(
         Tool::ALL
             .into_iter()
-            .filter(|t| !(plan && t.mutates()))
+            .filter(|t| keep(*t))
             .map(|t| {
                 let (desc, params) = t.schema();
                 json!({"type":"function","function":{"name":t.name(),"description":desc,"parameters":params}})
@@ -294,7 +299,7 @@ pub async fn execute(ctx: &mut ToolCtx, name: &str, args: &str) -> String {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("Error: {e:#}");
-            println!("  {}", ui::red(&format!("└ {msg}")));
+            ui::tool_error(&msg);
             msg
         }
     }
@@ -402,7 +407,7 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
             if out.success() {
                 ui::tool_result(first);
             } else {
-                println!("  {}", ui::red(&format!("└ {first}")));
+                ui::tool_error(first);
             }
             // Anything beyond the read/build/test allowlist (sed -i, codegen, …) may have changed files.
             ctx.changed |= !safety::is_allowed(&a.command, &[]);
