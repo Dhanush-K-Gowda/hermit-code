@@ -2,6 +2,7 @@ pub mod agent;
 pub mod complete;
 pub mod config;
 pub mod context;
+pub mod image;
 pub mod llm;
 pub mod markdown;
 pub mod repl;

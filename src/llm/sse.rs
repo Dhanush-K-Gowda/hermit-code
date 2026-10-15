@@ -1,6 +1,6 @@
 //! Incremental Server-Sent Events parsing and streaming-delta accumulation.
 
-use super::types::{FunctionCall, Message, Role, ToolCall, Usage};
+use super::types::{FunctionCall, Message, ToolCall, Usage};
 use anyhow::{bail, Result};
 use serde_json::Value;
 
@@ -121,12 +121,7 @@ impl Accumulator {
                 },
             })
             .collect();
-        Message {
-            role: Role::Assistant,
-            content: if self.content.is_empty() { None } else { Some(self.content) },
-            tool_calls,
-            tool_call_id: None,
-        }
+        Message::assistant(if self.content.is_empty() { None } else { Some(self.content) }, tool_calls)
     }
 }
 

@@ -51,6 +51,8 @@ pub struct Agent {
     session_created: u64,
     /// Where sessions are saved; None disables persistence.
     pub sessions_dir: Option<PathBuf>,
+    /// Where this turn's image requests go (decided once per turn).
+    vision_route: Option<VisionRoute>,
 }
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(900);
@@ -65,7 +67,16 @@ State: what currently works or fails.\n\
 Next: remaining steps.\n\
 Use only facts from the transcript. No preamble.";
 
+#[derive(Clone)]
+enum VisionRoute {
+    AsIs,
+    Model(String),
+    Strip,
+}
+
 const EXPLORE: &str = "explore";
+/// Only the newest images are sent; older ones become a short note.
+const MAX_SENT_IMAGES: usize = 3;
 const EXPLORE_MAX_STEPS: usize = 25;
 const EXPLORE_REPORT_CAP: usize = 12 * 1024;
 
@@ -160,6 +171,7 @@ impl Agent {
             session_id: String::new(),
             session_created: 0,
             sessions_dir: session::dir(),
+            vision_route: None,
         };
         a.reset();
         Ok(a)
@@ -236,6 +248,15 @@ impl Agent {
         if !convo.iter().any(|m| m.role == Role::User) {
             return None;
         }
+        // Image data stays out of session files; a note remains in its place.
+        let messages = convo
+            .iter()
+            .cloned()
+            .map(|mut m| {
+                m.drop_images("attached (not saved in the session)");
+                m
+            })
+            .collect();
         Some(Session {
             id: self.session_id.clone(),
             root: self.settings.root.clone(),
@@ -246,7 +267,7 @@ impl Agent {
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
             todos: self.tools.todos.clone(),
-            messages: convo.to_vec(),
+            messages,
         })
     }
 
@@ -274,8 +295,15 @@ impl Agent {
 
     /// Handle one user request end to end, including verification.
     pub async fn run_turn(&mut self, input: &str) -> Result<Outcome> {
+        self.run_turn_with_images(input, Vec::new()).await
+    }
+
+    /// Like `run_turn`, with images (`data:` URLs) attached to the user's message.
+    pub async fn run_turn_with_images(&mut self, input: &str, images: Vec<String>) -> Result<Outcome> {
+        self.vision_route = None;
         self.tools.undo.begin_turn();
         self.tools.changed = false;
+        let first_new = self.messages.len();
         if self.plan_mode {
             self.messages.push(Message::user(format!(
                 "{input}\n\n[Plan mode: investigate with read-only tools only and do not modify anything. \
@@ -285,6 +313,7 @@ impl Agent {
         } else {
             self.messages.push(Message::user(input));
         }
+        self.messages[first_new].images = images;
         let outcome = self.steps().await?;
         if outcome != Outcome::Done || !self.tools.changed || !self.settings.verify {
             return Ok(outcome);
@@ -377,6 +406,53 @@ impl Agent {
         let after = context::estimate_tokens(&self.messages);
         if after < before {
             ui::notice(&format!("context compacted: ~{before} → ~{after} tokens"));
+        }
+    }
+
+    /// If the conversation has images, return a copy that keeps only the newest
+    /// `MAX_SENT_IMAGES`, plus the model to send it to when the active one can't read images.
+    async fn prepare_images(&mut self) -> (Option<Vec<Message>>, Option<String>) {
+        if !self.messages.iter().any(|m| !m.images.is_empty()) {
+            return (None, None);
+        }
+        let mut msgs = self.messages.clone();
+        let mut kept = 0;
+        for m in msgs.iter_mut().rev().filter(|m| !m.images.is_empty()) {
+            if kept + m.images.len() > MAX_SENT_IMAGES {
+                m.drop_images("shown earlier (no longer attached)");
+            } else {
+                kept += m.images.len();
+            }
+        }
+        if self.vision_route.is_none() {
+            self.vision_route = Some(self.choose_vision_route().await);
+        }
+        match self.vision_route.clone() {
+            Some(VisionRoute::Model(m)) => (Some(msgs), Some(m)),
+            Some(VisionRoute::Strip) => {
+                msgs.iter_mut().for_each(|m| m.drop_images("not sent: the model can't read images"));
+                (Some(msgs), None)
+            }
+            _ => (Some(msgs), None),
+        }
+    }
+
+    /// Decide (once per turn) where a request with images should go.
+    async fn choose_vision_route(&self) -> VisionRoute {
+        let active = self.client.active_model().to_string();
+        // Unknown (e.g. a non-OpenRouter provider): send as is and let the provider decide.
+        if self.client.supports_vision(&active).await != Some(false) {
+            return VisionRoute::AsIs;
+        }
+        match self.client.vision_model(self.settings.vision_model.as_deref()).await {
+            Some(vm) if vm != active => {
+                ui::notice(&format!("{active} can't read images; using {vm} for this turn (set vision_model to choose)"));
+                VisionRoute::Model(vm)
+            }
+            _ => {
+                ui::notice(&format!("{active} can't read images and no vision model was found; sending text only"));
+                VisionRoute::Strip
+            }
         }
     }
 
@@ -491,17 +567,20 @@ impl Agent {
         for _ in 0..self.settings.max_steps {
             self.compact(false).await;
 
+            // Images: send only the most recent few, to a model that can read them.
+            let (with_images, route) = self.prepare_images().await;
             let (defs, instructions) = if self.plan_mode {
                 (&self.plan_defs, &self.plan_text_instructions)
             } else {
                 (&self.tool_defs, &self.text_instructions)
             };
+            let base = with_images.as_deref().unwrap_or(&self.messages);
             let converted;
             let (msgs, tool_defs) = if self.text_mode {
-                converted = text_tools::to_text_protocol(&self.messages, instructions);
+                converted = text_tools::to_text_protocol(base, instructions);
                 (converted.as_slice(), None)
             } else {
-                (self.messages.as_slice(), Some(defs))
+                (base, Some(defs))
             };
 
             let started = Cell::new(false);
@@ -509,7 +588,12 @@ impl Agent {
             let mut md = Renderer::new();
             let mut on_text = |t: &str| show(&started, &mut md, &filter.push(t));
             self.model_calls += 1;
-            let chat = self.client.chat(msgs, tool_defs, &mut on_text);
+            let chat = async {
+                match &route {
+                    Some(m) => self.client.chat_using(m, msgs, tool_defs, &mut on_text).await,
+                    None => self.client.chat(msgs, tool_defs, &mut on_text).await,
+                }
+            };
             let res = cancellable(ui::spin("thinking", &started, chat)).await;
             show(&started, &mut md, &filter.finish());
             md.finish();

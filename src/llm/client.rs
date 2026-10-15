@@ -5,7 +5,8 @@ use super::types::{Message, Usage};
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
 pub struct Completion {
@@ -27,6 +28,14 @@ pub struct Client {
     /// Index into [model, fallbacks…] to try first. Moves to a fallback that worked after
     /// the preferred model kept failing (e.g. rate limits), so later calls skip the busy one.
     preferred: Cell<usize>,
+    catalog: RefCell<Option<Rc<Vec<ModelInfo>>>>,
+}
+
+/// What the provider's catalog says about a model.
+pub struct ModelInfo {
+    pub id: String,
+    pub tools: bool,
+    pub vision: bool,
 }
 
 impl Client {
@@ -46,6 +55,7 @@ impl Client {
             max_tokens: None,
             retries: 3,
             preferred: Cell::new(0),
+            catalog: RefCell::new(None),
         })
     }
 
@@ -185,24 +195,78 @@ impl Client {
         Ok(Completion { message: acc.into_message(), usage, model: model.to_string() })
     }
 
-    /// List free models on OpenRouter; with `tools_only`, only those with native tool calling.
-    pub async fn list_free_models(&self, tools_only: bool) -> Result<Vec<String>> {
-        let v: Value = self.http.get(format!("{}/models", self.base_url)).send().await?.json().await?;
-        let mut out: Vec<String> = v["data"]
+    /// The provider's model catalog (fetched once, then cached). Empty if unavailable.
+    async fn catalog(&self) -> Rc<Vec<ModelInfo>> {
+        if let Some(c) = self.catalog.borrow().as_ref() {
+            return c.clone();
+        }
+        let fetched = self.fetch_catalog().await.unwrap_or_default();
+        let c = Rc::new(fetched);
+        *self.catalog.borrow_mut() = Some(c.clone());
+        c
+    }
+
+    async fn fetch_catalog(&self) -> Result<Vec<ModelInfo>> {
+        let v: Value = self.http.get(format!("{}/models", self.base_url)).send().await?.error_for_status()?.json().await?;
+        let has = |m: &Value, key: &str, val: &str| m[key].as_array().is_some_and(|a| a.iter().any(|x| x == val));
+        Ok(v["data"]
             .as_array()
             .map(|a| {
                 a.iter()
-                    .filter(|m| {
-                        m["id"].as_str().is_some_and(|id| id.ends_with(":free"))
-                            && (!tools_only
-                                || m["supported_parameters"]
-                                    .as_array()
-                                    .is_some_and(|p| p.iter().any(|x| x == "tools")))
+                    .filter_map(|m| {
+                        Some(ModelInfo {
+                            id: m["id"].as_str()?.to_string(),
+                            tools: has(m, "supported_parameters", "tools"),
+                            vision: has(&m["architecture"], "input_modalities", "image"),
+                        })
                     })
-                    .filter_map(|m| m["id"].as_str().map(String::from))
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default())
+    }
+
+    /// Whether `model` accepts image input, per the catalog. None if unknown.
+    pub async fn supports_vision(&self, model: &str) -> Option<bool> {
+        self.catalog().await.iter().find(|m| m.id == model).map(|m| m.vision)
+    }
+
+    /// Pick a model that can read images: `preferred` if given, else the first vision-capable
+    /// model in the fallback chain, else a free catalog model with vision and tool support.
+    pub async fn vision_model(&self, preferred: Option<&str>) -> Option<String> {
+        if let Some(p) = preferred {
+            return Some(p.to_string());
+        }
+        let cat = self.catalog().await;
+        let vision = |id: &str| cat.iter().any(|m| m.id == id && m.vision);
+        if let Some(m) = self.chain().find(|m| vision(m)) {
+            return Some(m.clone());
+        }
+        cat.iter().find(|m| m.vision && m.tools && m.id.ends_with(":free")).map(|m| m.id.clone())
+    }
+
+    /// Like `chat`, but against one specific model (with retries, no fallback chain).
+    pub async fn chat_using(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: Option<&Value>,
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<Completion> {
+        self.chat_with_model(model, messages, tools, on_text).await
+    }
+
+    /// List free models; with `tools_only`, only those with native tool calling.
+    /// Vision-capable models are marked with "(images)".
+    pub async fn list_free_models(&self, tools_only: bool) -> Result<Vec<String>> {
+        let cat = self.catalog().await;
+        if cat.is_empty() {
+            bail!("could not fetch the model list from {}", self.base_url);
+        }
+        let mut out: Vec<String> = cat
+            .iter()
+            .filter(|m| m.id.ends_with(":free") && (!tools_only || m.tools))
+            .map(|m| if m.vision { format!("{} (images)", m.id) } else { m.id.clone() })
+            .collect();
         out.sort();
         Ok(out)
     }

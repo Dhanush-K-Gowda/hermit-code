@@ -9,9 +9,10 @@ A small, fast coding agent written in Rust. It talks to any OpenAI-compatible mo
 - Single ~4 MB binary, about 4–5 MB peak memory (on a single-threaded tokio runtime)
 - Streams responses and retries with backoff. If a free model stays rate-limited, it switches to a fallback model for the rest of the session
 - Tool output is capped (head and tail are kept). Long conversations are summarized by the model so recent context stays word for word
-- Clean terminal UI: plain ANSI, no TUI framework. Replies stream live and are rendered as Markdown (headings, bold, code blocks, lists)
+- Clean terminal UI: plain ANSI, no TUI framework. Replies stream live and are rendered as Markdown (headings, bold, code blocks, lists, and tables that fit the terminal width)
 - Plan mode: read-only investigation that ends in a plan you approve before anything changes
 - Sub-agents: the model hands broad codebase searches to a read-only `explore` helper with its own context, so the main conversation stays small
+- Images: paste a screenshot with Ctrl+V or drag in an image file. Turns with images go to a model that can read them
 - Plans multi-step work with a live todo list, remembers project facts in `HERMIT.md`, and saves every session so you can resume it
 - Works with models that lack native tool calling (it switches to text-based tool calls automatically)
 
@@ -67,6 +68,8 @@ hermit --plan -p "how would you add auth?"  # plan only; nothing is changed
 
 ### In the REPL
 
+Paste an image with **Ctrl+V** (e.g. a screenshot taken with ⌘⇧⌃4), or drag an image file into the terminal. Either one becomes an `[Image #1]` placeholder in your message (details under [Images](#images)).
+
 Type `/` to see every command as a gray suggestion. Keep typing to narrow it down: `/p` suggests `/plan [task|off]`. Press → or Tab to accept. Tab on `/` lists all commands, and Tab after `/model ` offers your configured models.
 
 | Input | What it does |
@@ -74,7 +77,7 @@ Type `/` to see every command as a gray suggestion. Keep typing to narrow it dow
 | `fix the login bug` | Send a request to the agent |
 | `!git status` | Run a shell command yourself. No approval prompt; the output is added to the conversation so the model can see it |
 | `/model [id]` | Show or switch the model |
-| `/models [all]` | List current free OpenRouter models: those with native tool calling, or `all` |
+| `/models [all]` | List current free OpenRouter models: those with native tool calling, or `all`. Models that accept images are marked `(images)` |
 | `/plan [task\|off]` | Plan mode: read-only, ends with a plan to approve (see below) |
 | `/todo` | Show the agent's task list |
 | `/remember <fact>` | Save a note to this project's `HERMIT.md` |
@@ -88,7 +91,7 @@ Type `/` to see every command as a gray suggestion. Keep typing to narrow it dow
 | `/cost` | Token usage this session |
 | `/exit` | Quit (Ctrl-D also works) |
 
-End a line with `\` to continue on the next line. Ctrl-C cancels the running request or command. `!` commands are non-interactive (no `vim` or `top`), and `!cd` doesn't carry over to the next command.
+End a line with `\` to continue on the next line. Ctrl-C cancels the running request or command; at an empty prompt, pressing Ctrl-C twice exits. `!` commands are non-interactive (no `vim` or `top`), and `!cd` doesn't carry over to the next command.
 
 ## Tools the model gets
 
@@ -143,6 +146,10 @@ approve plan? [y] implement · [n] keep planning · or type feedback ›
   └ 3 steps · 0.1k chars report
 ```
 
+<a id="images"></a>**Images.** Press **Ctrl+V** to paste an image from the clipboard (macOS uses the built-in `osascript`; Linux uses `wl-paste` or `xclip`). You can also type or drag in a path such as `~/Desktop/shot.png`, `'my shot.png'` or `my\ shot.png`, or include one in `-p "..."`. Both are attached as `[Image #n]`, and the model sees the image next to your text. Supported formats are PNG, JPEG, GIF and WebP.
+- **Efficient:** on macOS, images whose longest side is over 1568 px are downscaled to JPEG with the built-in `sips`, and base64 encoding is hand-written, so there are no image libraries. Only the 3 most recent images are sent; older ones become a short note. Compaction removes old images first, and sessions save a note instead of the image data.
+- **Routed to a model that can see:** hermit checks the provider's model catalog once. If the current model can't read images, the turn goes to `vision_model` if you set one, otherwise to the first image-capable model in your fallbacks, otherwise to a free model with image and tool support, and it tells you which. If none is available, only the text is sent.
+
 **Todo list.** For multi-step tasks, the model writes a checklist with `todo_write` and updates it as it works:
 
 ```
@@ -154,7 +161,13 @@ approve plan? [y] implement · [n] keep planning · or type feedback ›
 
 **Project memory.** When the model learns something durable, such as how to run tests, a project convention or a gotcha, it saves it with `remember`. You can also add notes yourself with `/remember`. Notes go to `HERMIT.md` in the project, or to `~/.config/hermit/HERMIT.md` for preferences that apply everywhere. Both files are loaded into every new session, along with `AGENTS.md` or `CLAUDE.md` if the project has one. `HERMIT.md` is plain Markdown, so you can edit it or commit it.
 
-**Sessions.** Every conversation is saved to `~/.config/hermit/sessions/` after each turn, including its todo list. The 100 most recent are kept. Resume with `hermit -c`, `hermit --resume <id>`, or `/sessions` and `/resume` in the REPL.
+**Sessions.** Every conversation is saved to `~/.config/hermit/sessions/` after each turn, including its todo list. The 100 most recent are kept. When you leave hermit (`/exit`, Ctrl-D, or Ctrl-C twice), it prints the exact command to come back:
+
+```
+Resume this session with: hermit --resume 1760234512-a1b2
+```
+
+`hermit --resume <id>` works from any folder and switches to that session's project. On resume, the whole conversation is shown again: your messages, Markdown-rendered replies, and compact tool lines, with diffs for edits. You can also use `hermit -c` (the latest session in the current folder), or `/sessions` and `/resume` in the REPL.
 
 **Context compaction.** When the conversation goes over `context_budget_tokens`, the model writes a summary of the older turns (goal, changes so far, key findings, current state, next steps). That summary replaces the older turns, and the most recent turns are kept word for word. If summarizing fails, hermit trims old tool output instead. Run `/compact` to do it by hand.
 
@@ -174,6 +187,7 @@ max_fix_attempts = 3
 context_budget_tokens = 60000
 command_timeout_secs = 120
 tool_mode = "auto"                 # auto | native | text
+vision_model = "google/gemma-4-31b-it:free"   # for image turns when the main model can't see
 
 # Any OpenAI-compatible provider works, e.g. local Ollama:
 # base_url = "http://localhost:11434/v1"
@@ -211,6 +225,7 @@ The end-to-end tests in `tests/agent_e2e.rs` cover:
 - saving and resuming a session
 - plan mode refusing edits until approval
 - the main agent delegating to an `explore` sub-agent (read-only tools, only the report returned)
+- image turns routed to a vision model, or sent as text only when none exists
 
 | Module | Role |
 |---|---|
@@ -222,4 +237,5 @@ The end-to-end tests in `tests/agent_e2e.rs` cover:
 | `src/safety.rs` | Workspace confinement and command allowlist |
 | `src/repl.rs`, `src/ui.rs` | REPL commands, plan approval, terminal rendering |
 | `src/complete.rs` | Slash-command table, inline hints and Tab completion |
-| `src/markdown.rs` | Streaming Markdown renderer (redraws each line in place once it completes) |
+| `src/image.rs` | Clipboard images, image paths, downscaling and base64 data URLs |
+| `src/markdown.rs` | Streaming Markdown renderer: redraws each line in place once it completes, and draws tables with aligned, wrapped columns |

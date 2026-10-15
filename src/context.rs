@@ -79,6 +79,15 @@ pub fn compact(messages: &mut [Message], budget: usize, keep_recent: usize) -> b
         return false;
     }
     let end = messages.len().saturating_sub(keep_recent);
+    // Pass 0: images in old messages (the most expensive part).
+    for m in messages[..end].iter_mut().filter(|m| !m.images.is_empty()) {
+        if tokens <= budget {
+            return true;
+        }
+        let before = m.char_len();
+        m.drop_images("removed to save context");
+        tokens = tokens.saturating_sub(before.saturating_sub(m.char_len()) / 4);
+    }
     // Pass 1: old tool outputs. Pass 2: old long user/assistant text.
     for pass in 0..2 {
         for m in messages[..end].iter_mut() {
@@ -139,6 +148,9 @@ pub fn transcript(messages: &[Message], max_chars: usize) -> String {
         if let Some(c) = &m.content {
             out.push_str(&truncate_middle(c, limit / 2, limit / 2));
             out.push('\n');
+        }
+        if !m.images.is_empty() {
+            out.push_str(&format!("[{} image(s) attached]\n", m.images.len()));
         }
         for c in &m.tool_calls {
             out.push_str(&format!("[called {} {}]\n", c.function.name, truncate_middle(&c.function.arguments, 600, 200)));

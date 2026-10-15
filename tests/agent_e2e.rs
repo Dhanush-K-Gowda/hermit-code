@@ -60,6 +60,7 @@ async fn edits_then_fixes_until_verification_passes() {
         temperature: None,
         max_tokens: None,
         tool_mode: hermit::config::ToolMode::Auto,
+        vision_model: None,
         yolo: true,
     };
     let mut agent = Agent::new(settings).unwrap();
@@ -375,4 +376,96 @@ async fn main_agent_delegates_to_explore_subagent() {
     // The main agent offers explore.
     let main_first: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert!(main_first["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "explore"));
+}
+
+fn catalog(models: &[(&str, bool)]) -> ResponseTemplate {
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .map(|(id, vision)| json!({
+            "id": id,
+            "supported_parameters": ["tools"],
+            "architecture": {"input_modalities": if *vision { json!(["text","image"]) } else { json!(["text"]) }}
+        }))
+        .collect();
+    ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+}
+
+const IMG: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+#[tokio::test]
+async fn image_turns_go_to_a_vision_model() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/models"))
+        .respond_with(catalog(&[("mock-model", false), ("other/text:free", false), ("vis/model:free", true)]))
+        .mount(&server).await;
+    Mock::given(method("POST")).respond_with(sse(sse_text("The button is misaligned."))).mount(&server).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut agent = Agent::new(settings_for(&server, &root)).unwrap();
+    agent.sessions_dir = Some(dir.path().join("sessions"));
+    agent.run_turn_with_images("what's wrong in [Image #1]?", vec![IMG.into()]).await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let chat: Vec<serde_json::Value> = reqs.iter().filter(|r| r.method.as_str() == "POST")
+        .map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+    assert_eq!(chat.len(), 1);
+    assert_eq!(chat[0]["model"], "vis/model:free", "routed to the vision model");
+    let user = &chat[0]["messages"][1]["content"];
+    assert_eq!(user[0], json!({"type":"text","text":"what's wrong in [Image #1]?"}));
+    assert_eq!(user[1]["image_url"]["url"], IMG);
+    assert_eq!(reqs.iter().filter(|r| r.method.as_str() == "GET").count(), 1, "catalog fetched once");
+
+    // Sessions keep a note, not the image data.
+    agent.save_session();
+    let saved = std::fs::read_to_string(dir.path().join("sessions").join(format!("{}.json", agent.session_id))).unwrap();
+    assert!(!saved.contains("base64"));
+    assert!(saved.contains("[1 image attached (not saved in the session)]"));
+
+    // A text-only turn without images in context uses the normal model again.
+    agent.reset();
+    agent.run_turn("hello").await.unwrap();
+    let last: serde_json::Value = serde_json::from_slice(&server.received_requests().await.unwrap().last().unwrap().body).unwrap();
+    assert_eq!(last["model"], "mock-model");
+}
+
+#[tokio::test]
+async fn images_are_stripped_when_no_vision_model_exists() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/models")).respond_with(catalog(&[("mock-model", false)])).mount(&server).await;
+    Mock::given(method("POST")).respond_with(sse(sse_text("I can't see images."))).mount(&server).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut agent = Agent::new(settings_for(&server, &root)).unwrap();
+    agent.run_turn_with_images("look", vec![IMG.into(), IMG.into()]).await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let post = reqs.iter().find(|r| r.method.as_str() == "POST").unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+    assert_eq!(body["model"], "mock-model");
+    assert_eq!(body["messages"][1]["content"], "look\n[2 images not sent: the model can't read images]");
+    // The conversation itself still holds the images (e.g. for a later /model switch).
+    assert_eq!(agent.messages[1].images.len(), 2);
+}
+
+#[test]
+fn attach_turns_paths_and_pasted_images_into_placeholders() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // 1x1 PNG
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41,
+        0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(root.join("shot one.png"), png).unwrap();
+    let clip = hermit::repl::Clipboard::default();
+    let (text, images) = hermit::repl::attach("compare 'shot one.png' with this", &root, &clip);
+    assert_eq!(text, "compare [Image #1] with this");
+    assert_eq!(images.len(), 1);
+    assert!(images[0].starts_with("data:image/png;base64,"));
+    let (text, images) = hermit::repl::attach("no images here", &root, &clip);
+    assert_eq!((text.as_str(), images.len()), ("no images here", 0));
 }

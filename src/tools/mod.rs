@@ -416,6 +416,52 @@ async fn execute_inner(ctx: &mut ToolCtx, name: &str, args: &str) -> Result<Stri
     }
 }
 
+/// Re-print a past tool call for session replay: its header plus a one-line result
+/// (edits show their diff again). Raw outputs aren't repeated.
+pub fn replay(root: &Path, name: &str, args: &str, result: Option<&str>) {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let arg = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let path = || shown(root, &arg("path"));
+    let (verb, summary) = match name {
+        "read_file" => ("Read", path()),
+        "write_file" => ("Write", path()),
+        "edit_file" => ("Edit", path()),
+        "list_dir" => ("List", shown(root, v.get("path").and_then(Value::as_str).unwrap_or("."))),
+        "glob" => ("Glob", arg("pattern")),
+        "grep" => ("Grep", arg("pattern")),
+        "run_command" => ("Run", arg("command")),
+        "todo_write" => ("Todo", todo::parse(&v).map(|t| todo::progress(&t)).unwrap_or_default()),
+        "remember" => ("Remember", arg("fact")),
+        "explore" => {
+            let d = arg("description");
+            ("Explore", if d.is_empty() { arg("task").chars().take(70).collect() } else { d })
+        }
+        other => (other, String::new()),
+    };
+    ui::tool_header(verb, &summary);
+    let Some(r) = result else { return };
+    let first = r.lines().next().unwrap_or("");
+    if r.starts_with("Error:") {
+        return ui::tool_error(first);
+    }
+    match name {
+        "edit_file" => {
+            // Saved edits are snippets; end them with a newline so the diff stays clean.
+            let nl = |t: String| if t.ends_with('\n') { t } else { t + "\n" };
+            ui::diff(&path(), &nl(arg("old")), &nl(arg("new")))
+        }
+        "read_file" => ui::tool_result(&count(r, "line")),
+        "list_dir" => ui::tool_result(&count(r, "entry")),
+        "glob" => ui::tool_result(&count(r, "file")),
+        "grep" => ui::tool_result(&count(r, "match")),
+        "run_command" => {
+            let status = first.trim_matches(['[', ']']);
+            if status == "exit code 0" { ui::tool_result(status) } else { ui::tool_error(status) }
+        }
+        _ => ui::tool_result(first),
+    }
+}
+
 /// Path as given by the model, shown relative to the workspace when it's inside it.
 fn shown(root: &Path, p: &str) -> String {
     match Path::new(p).strip_prefix(root) {

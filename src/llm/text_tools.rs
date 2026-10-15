@@ -71,7 +71,7 @@ pub fn to_text_protocol(messages: &[Message], instructions: &str) -> Vec<Message
                     }
                     c.push_str(&format!("{OPEN}\n{block}\n{CLOSE}"));
                 }
-                out.push(Message { role: Role::Assistant, content: Some(c), tool_calls: Vec::new(), tool_call_id: None });
+                out.push(Message::assistant(Some(c), Vec::new()));
             }
             Role::User => {
                 flush(&mut results, &mut out);
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn history_round_trips_to_text() {
-        let mut a = Message { role: Role::Assistant, content: Some("checking".into()), tool_calls: vec![], tool_call_id: None };
+        let mut a = Message::assistant(Some("checking".into()), vec![]);
         a.tool_calls.push(ToolCall {
             id: "c1".into(),
             kind: "function".into(),

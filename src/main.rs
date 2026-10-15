@@ -57,11 +57,19 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> Result<i32> {
-    let dir = match cli.dir {
+    let dir = match cli.dir.clone() {
         Some(d) => d,
         None => std::env::current_dir()?,
     };
-    let root = dir.canonicalize().with_context(|| format!("no such directory: {}", dir.display()))?;
+    let mut root = dir.canonicalize().with_context(|| format!("no such directory: {}", dir.display()))?;
+    // `--resume <exact id>` from another folder: work in the session's original project.
+    if let (None, Some(id), Some(sessions)) = (&cli.dir, &cli.resume, hermit::session::dir()) {
+        if let Ok(saved) = hermit::session::Session::load(&sessions, id) {
+            if saved.root != root && saved.root.is_dir() {
+                root = saved.root;
+            }
+        }
+    }
     let mut s = Settings::load(&root)?;
     if let Some(m) = cli.model {
         s.model = m;
@@ -89,8 +97,10 @@ async fn run(cli: Cli) -> Result<i32> {
             if let Some(r) = &resume_arg {
                 hermit::repl::resume(&mut agent, r);
             }
-            let outcome = hermit::repl::turn(&mut agent, &p).await;
+            let (p, images) = hermit::repl::attach(&p, &agent.settings.root.clone(), &Default::default());
+            let outcome = hermit::repl::turn(&mut agent, &p, images).await;
             agent.save_session();
+            hermit::repl::resume_hint(&agent);
             let outcome = outcome?;
             if agent.plan_mode && outcome == Outcome::Done {
                 println!("{}", hermit::ui::dim("plan only, nothing changed. To implement it: hermit -c -p \"go ahead\""));

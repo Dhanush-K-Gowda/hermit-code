@@ -31,6 +31,8 @@ pub struct FileConfig {
     pub max_tokens: Option<u32>,
     /// "auto" (default), "native" or "text".
     pub tool_mode: Option<String>,
+    /// Model used for turns with images when the main model can't read them.
+    pub vision_model: Option<String>,
 }
 
 impl FileConfig {
@@ -39,7 +41,7 @@ impl FileConfig {
             ($($f:ident),*) => { $( if o.$f.is_some() { self.$f = o.$f; } )* };
         }
         take!(base_url, api_key, api_key_env, model, fallback_models, verify_cmd, verify, max_steps,
-              max_fix_attempts, context_budget_tokens, command_timeout_secs, temperature, max_tokens, tool_mode);
+              max_fix_attempts, context_budget_tokens, command_timeout_secs, temperature, max_tokens, tool_mode, vision_model);
         self.allow_commands.extend(o.allow_commands);
         self
     }
@@ -84,6 +86,7 @@ pub struct Settings {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub tool_mode: ToolMode,
+    pub vision_model: Option<String>,
     pub yolo: bool,
 }
 
@@ -131,6 +134,7 @@ impl Settings {
             temperature: fc.temperature,
             max_tokens: fc.max_tokens,
             tool_mode: fc.tool_mode.as_deref().unwrap_or("auto").parse()?,
+            vision_model: fc.vision_model,
             yolo: false,
         })
     }
