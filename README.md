@@ -43,13 +43,29 @@ A small, fast coding agent written in Rust. It talks to any OpenAI-compatible mo
 
 ## Install
 
+hermit runs on **macOS** (Apple Silicon and Intel) and **Linux** (x86_64 and ARM64). Windows isn't supported.
+
 ```sh
-curl https://sh.rustup.rs -sSf | sh                                  # if Rust isn't installed
-cargo install --git https://github.com/Dhanush-K-Gowda/hermit-code   # or, from a clone: cargo install --path .
-export OPENROUTER_API_KEY=sk-or-...                                  # free key: https://openrouter.ai/keys
+curl -fsSL https://raw.githubusercontent.com/Dhanush-K-Gowda/hermit-code/main/install.sh | sh
+export OPENROUTER_API_KEY=sk-or-...   # free key: https://openrouter.ai/keys
+hermit
 ```
 
-`cargo build` only updates `target/release/`. To update the installed `hermit`, re-run the install command with `--force`.
+The script downloads the prebuilt binary for your platform from the [latest release](https://github.com/Dhanush-K-Gowda/hermit-code/releases/latest), checks its SHA-256 checksum, and installs it to `~/.local/bin`. If that folder isn't on your `PATH`, it tells you how to add it. The Linux binaries are fully static, so they work on any distro. Options:
+
+```sh
+curl -fsSL …/install.sh | HERMIT_VERSION=v0.1.0 sh               # a specific version
+curl -fsSL …/install.sh | HERMIT_INSTALL_DIR=/usr/local/bin sh   # another location (may need sudo)
+```
+
+**Update:** run the same command again. **Uninstall:** `rm ~/.local/bin/hermit` (and `rm -rf ~/.config/hermit` to remove config, memory and sessions).
+
+**From source** (requires [Rust](https://rustup.rs)):
+
+```sh
+cargo install --git https://github.com/Dhanush-K-Gowda/hermit-code
+# or, from a clone: cargo install --path . --force
+```
 
 ## Usage
 
@@ -216,6 +232,19 @@ cargo test                  # unit tests + end-to-end tests against a mock model
 cargo clippy --all-targets
 cargo build --release       # optimized binary in target/release/hermit
 ```
+
+**Releasing:** bump `version` in `Cargo.toml`, commit, then push a matching tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The `release` workflow then:
+- builds macOS (arm64, x86_64) and static Linux musl (x86_64, arm64) binaries
+- checks that the tag matches the `Cargo.toml` version
+- publishes a GitHub Release with `.tar.gz` archives and `.sha256` checksums, which `install.sh` uses
+
+CI (`ci` workflow) runs clippy and the tests on macOS and Linux for every push and pull request.
 
 The end-to-end tests in `tests/agent_e2e.rs` cover:
 - a full edit → verify → fix loop
