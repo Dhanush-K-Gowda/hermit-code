@@ -2,28 +2,39 @@
   <img src="assets/banner.png" alt="hermit code — small, fast coding agent in Rust" width="100%">
 </p>
 
-# hermit code
+<p align="center">
+  <b>A tiny, fast coding agent for your terminal.</b><br>
+  Edits your code, runs your commands, and checks that the code works. Runs on free models.
+</p>
 
-A small, fast coding agent written in Rust. It talks to any OpenAI-compatible model, defaulting to **free OpenRouter models**. It reads and edits files, runs shell commands, and **checks that the code works**: after it makes changes, it runs your build and tests, and if they fail it sends the failures back to the model until they pass.
+<p align="center">
+  <a href="https://github.com/Dhanush-K-Gowda/hermit-code/actions/workflows/ci.yml"><img src="https://github.com/Dhanush-K-Gowda/hermit-code/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Dhanush-K-Gowda/hermit-code/releases/latest"><img src="https://img.shields.io/github/v/release/Dhanush-K-Gowda/hermit-code?color=EC4899" alt="Release"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="macOS | Linux">
+  <img src="https://img.shields.io/badge/binary-~4%20MB-FFA662" alt="~4 MB binary">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
+</p>
 
-- Single ~4 MB binary, about 4–5 MB peak memory (on a single-threaded tokio runtime)
-- Streams responses and retries with backoff. If a free model stays rate-limited, it switches to a fallback model for the rest of the session
-- Tool output is capped (head and tail are kept). Long conversations are summarized by the model so recent context stays word for word
-- Clean terminal UI: plain ANSI, no TUI framework. Replies stream live and are rendered as Markdown (headings, bold, code blocks, lists, and tables that fit the terminal width)
-- Plan mode: read-only investigation that ends in a plan you approve before anything changes
-- Sub-agents: the model hands broad codebase searches to a read-only `explore` helper with its own context, so the main conversation stays small
-- Images: paste a screenshot with Ctrl+V or drag in an image file. Turns with images go to a model that can read them
-- Plans multi-step work with a live todo list, remembers project facts in `HERMIT.md`, and saves every session so you can resume it
-- Works with models that lack native tool calling (it switches to text-based tool calls automatically)
+---
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Dhanush-K-Gowda/hermit-code/main/install.sh | sh
+```
+
+Then get a free key at [openrouter.ai/keys](https://openrouter.ai/keys) and run it in a project folder:
+
+```sh
+export OPENROUTER_API_KEY=sk-or-...
+cd your-project && hermit
+```
+
+macOS (Apple Silicon and Intel) and Linux (x86_64 and ARM64, static binaries). To update, run the install command again. [More options](#install-options).
+
+## What it looks like
 
 ```
-  █ █ █▀▀ █▀█ █▀▄▀█ █ ▀█▀  v0.1.0
-  █▀█ ██▄ █▀▄ █ ▀ █ █  █   small, fast coding agent
-
-  model   poolside/laguna-s-2.1:free
-  dir     ~/repos/demo
-  verify  cargo check --all-targets --quiet && cargo test --quiet
-
 ❯ fix the failing test
 
 ● Grep fn add
@@ -33,7 +44,6 @@ A small, fast coding agent written in Rust. It talks to any OpenAI-compatible mo
     -pub fn add(a: i32, b: i32) -> i32 { a - b }
     +pub fn add(a: i32, b: i32) -> i32 { a + b }
 ● Run cargo test --quiet
-  │ test result: ok. 1 passed; 0 failed
   └ exit code 0
 ◆ Fixed `add`: it subtracted instead of adding. Tests pass.
 ● Verify cargo check --all-targets --quiet && cargo test --quiet
@@ -41,119 +51,126 @@ A small, fast coding agent written in Rust. It talks to any OpenAI-compatible mo
 ── 5 steps · 876 tokens · 8.9s
 ```
 
-## Install
+## Features
 
-hermit runs on **macOS** (Apple Silicon and Intel) and **Linux** (x86_64 and ARM64). Windows isn't supported.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Dhanush-K-Gowda/hermit-code/main/install.sh | sh
-export OPENROUTER_API_KEY=sk-or-...   # free key: https://openrouter.ai/keys
-hermit
-```
-
-The script downloads the prebuilt binary for your platform from the [latest release](https://github.com/Dhanush-K-Gowda/hermit-code/releases/latest), checks its SHA-256 checksum, and installs it to `~/.local/bin`. If that folder isn't on your `PATH`, it tells you how to add it. The Linux binaries are fully static, so they work on any distro. Options:
-
-```sh
-curl -fsSL …/install.sh | HERMIT_VERSION=v0.1.0 sh               # a specific version
-curl -fsSL …/install.sh | HERMIT_INSTALL_DIR=/usr/local/bin sh   # another location (may need sudo)
-```
-
-**Update:** run the same command again. **Uninstall:** `rm ~/.local/bin/hermit` (and `rm -rf ~/.config/hermit` to remove config, memory and sessions).
-
-**From source** (requires [Rust](https://rustup.rs)):
-
-```sh
-cargo install --git https://github.com/Dhanush-K-Gowda/hermit-code
-# or, from a clone: cargo install --path . --force
-```
+| | |
+|---|---|
+| ✅ **Checks that it works** | After every change it runs your build and tests, and sends failures back to the model until they pass |
+| 🪶 **Tiny and fast** | One ~4 MB Rust binary, ~5 MB of memory, starts instantly. No Node, Python or TUI framework |
+| 🆓 **Free models** | OpenRouter free models out of the box, with automatic fallback when one is rate-limited. Any OpenAI-compatible API works |
+| 🧭 **Plan mode** | Read-only investigation that ends with a plan you approve before anything changes |
+| 🔎 **Sub-agents** | The model hands broad codebase searches to a read-only `explore` helper, so your context stays small |
+| 🖼️ **Images** | Paste a screenshot with Ctrl+V or drag in a file. It's sent to a model that can read images |
+| 📋 **Todo list** | Multi-step work is planned and tracked live |
+| 🧠 **Memory** | Remembers project facts in `HERMIT.md` across sessions |
+| 💾 **Sessions** | Every conversation is saved. Leave and come back with `hermit --resume <id>` |
+| 🗜️ **Smart context** | Long conversations are summarized by the model; recent turns stay word for word |
+| 🔧 **Any model** | Models without native tool calling work through text-based tool calls |
+| 🛡️ **Safe by default** | Stays inside the project folder, asks before unknown commands, `/undo` for edits |
 
 ## Usage
 
 ```sh
-hermit                                   # interactive REPL in the current directory
-hermit -p "make the failing tests pass"  # one-shot; exit 0 = done/verified, 2 = checks failing
-hermit -C ../other-repo -m google/gemma-4-31b-it:free
-hermit --yolo -p "..."                   # never ask before running commands
-hermit --verify "make lint test" -p "..."
-hermit --no-verify
-hermit -c                                # continue the latest session in this directory
-hermit --resume 1760234512-a1b2          # resume a specific session
-hermit --text-tools -m some/model:free   # force text-based tool calls
-hermit --plan -p "how would you add auth?"  # plan only; nothing is changed
+hermit                                  # interactive session
+hermit -p "make the failing tests pass" # one-shot (exit 0 = done, 2 = checks failing)
+hermit --plan -p "how would you add auth?"
+hermit -c                               # continue the latest session here
+hermit --resume <id>                    # resume a specific session, from any folder
+hermit -m google/gemma-4-31b-it:free    # pick a model
+hermit --yolo                           # don't ask before running commands
 ```
 
-### In the REPL
+In the REPL, type `/` to see every command. Press → or Tab to accept a suggestion.
 
-Paste an image with **Ctrl+V** (e.g. a screenshot taken with ⌘⇧⌃4), or drag an image file into the terminal. Either one becomes an `[Image #1]` placeholder in your message (details under [Images](#images)).
-
-Type `/` to see every command as a gray suggestion. Keep typing to narrow it down: `/p` suggests `/plan [task|off]`. Press → or Tab to accept. Tab on `/` lists all commands, and Tab after `/model ` offers your configured models.
-
-| Input | What it does |
+| | |
 |---|---|
-| `fix the login bug` | Send a request to the agent |
-| `!git status` | Run a shell command yourself. No approval prompt; the output is added to the conversation so the model can see it |
-| `/model [id]` | Show or switch the model |
-| `/models [all]` | List current free OpenRouter models: those with native tool calling, or `all`. Models that accept images are marked `(images)` |
-| `/plan [task\|off]` | Plan mode: read-only, ends with a plan to approve (see below) |
-| `/todo` | Show the agent's task list |
-| `/remember <fact>` | Save a note to this project's `HERMIT.md` |
-| `/memory` | Show saved project and user memory |
-| `/sessions` | List saved sessions for this directory |
-| `/resume [n\|id]` | Resume a session (default: the latest) |
-| `/compact` | Summarize older context now |
-| `/undo` | Revert file changes from the last turn |
-| `/verify` | Run the project's checks, and have the model fix failures |
-| `/clear` | Start a new conversation (the current one stays saved) |
-| `/cost` | Token usage this session |
-| `/exit` | Quit (Ctrl-D also works) |
+| `!git status` | Run a shell command yourself; the model sees the output |
+| **Ctrl+V** | Paste an image from the clipboard |
+| `/plan [task\|off]` | Plan mode (read-only, then you approve) |
+| `/model [id]` · `/models [all]` | Switch model · list free models (`(images)` = can read images) |
+| `/todo` · `/memory` · `/remember <fact>` | Task list · saved memory · add a note |
+| `/sessions` · `/resume [n\|id]` | List · resume sessions |
+| `/undo` · `/verify` · `/compact` | Revert last turn · run checks · summarize context |
+| `/clear` · `/cost` · `/exit` | New conversation · token usage · quit (or Ctrl-C twice) |
 
-End a line with `\` to continue on the next line. Ctrl-C cancels the running request or command; at an empty prompt, pressing Ctrl-C twice exits. `!` commands are non-interactive (no `vim` or `top`), and `!cd` doesn't carry over to the next command.
+## Config
 
-## Tools the model gets
+Optional. Put it in `~/.config/hermit/config.toml` (global) or `.hermit.toml` (per project).
 
-`read_file`, `write_file`, `edit_file` (exact, unique string replace), `list_dir`, `glob`, `grep` (both respect `.gitignore`), `run_command`, `todo_write` (task checklist), `remember` (project memory), and `explore` (read-only sub-agent).
+```toml
+model = "poolside/laguna-s-2.1:free"
+fallback_models = ["nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free"]
+vision_model = "google/gemma-4-31b-it:free"   # for images when the main model can't see
+verify_cmd = "cargo test"                     # override auto-detection
+allow_commands = ["make test"]                # run without asking
 
-- Every path is confined to the workspace, and `..` or symlink escapes are rejected.
-- File edits apply immediately and are shown as diffs. `/undo` reverts the last turn.
-- Shell commands ask y/n unless they're on the allowlist of read, build and test commands (`cargo test`, `git diff`, `npm test`, …), or you answer `a` (always) for the session.
+# Any OpenAI-compatible provider, e.g. local Ollama:
+# base_url = "http://localhost:11434/v1"
+# model = "qwen3-coder"
+```
 
-## Verification
+<details>
+<summary><b>All settings</b></summary>
 
-When a turn changed files, hermit runs a check command:
+Load order: `~/.config/hermit/config.toml` → `./.hermit.toml` → env vars (`OPENROUTER_API_KEY` or `HERMIT_API_KEY`, `HERMIT_MODEL`, `HERMIT_BASE_URL`) → CLI flags. `$XDG_CONFIG_HOME` replaces `~/.config` when set.
 
-| Project file | Command |
+```toml
+max_steps = 40                 # model calls per request
+max_fix_attempts = 3           # verify → fix rounds
+context_budget_tokens = 60000  # summarize older turns above this
+command_timeout_secs = 120
+tool_mode = "auto"             # auto | native | text
+temperature = 0.2
+max_tokens = 4096
+```
+
+CLI flags: `-C <dir>`, `--verify <cmd>`, `--no-verify`, `--max-steps <n>`, `--text-tools`. See `hermit --help`.
+</details>
+
+## How it works
+
+<details>
+<summary><b>Verification</b>: the edit → check → fix loop</summary>
+
+When a turn changes files, hermit runs the project's check command and hands any failures back to the model, up to `max_fix_attempts` times.
+
+| Project | Check |
 |---|---|
-| `Cargo.toml` | `cargo check --all-targets --quiet && cargo test --quiet` |
+| `Cargo.toml` | `cargo check --all-targets && cargo test` |
 | `go.mod` | `go build ./... && go test ./...` |
-| `package.json` | `npm run build` / `tsc --noEmit` and `npm test` (when defined) |
-| `pyproject.toml`, `pytest.ini`, `setup.py`, `tests/` | `python3 -m pytest -q -x` |
-| `Makefile` with a `test:` target | `make test` |
+| `package.json` | `npm run build` / `tsc --noEmit`, `npm test` |
+| `pyproject.toml`, `pytest.ini`, `tests/` | `python3 -m pytest -q -x` |
+| `Makefile` with `test:` | `make test` |
+</details>
 
-If the check fails, the output goes back to the model, up to `max_fix_attempts` times.
+<details>
+<summary><b>Tools and safety</b></summary>
 
-## Planning, memory and sessions
+The model gets `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `run_command`, `todo_write`, `remember` and `explore`.
 
-**Plan mode.** Run `/plan` to toggle it, or `/plan <task>` to start straight away. The prompt changes to `plan ❯`. In plan mode:
-- the model only gets read-only tools (read, list, glob, grep, todo)
-- file writes and edits are refused, even if a text-mode model tries them anyway
-- only read-only commands from the allowlist can run, so no formatters or `--fix`
+- Every path is confined to the workspace; `..` and symlink escapes are rejected.
+- Edits apply immediately and show as diffs. `/undo` reverts the last turn (changes made by shell commands aren't tracked).
+- Shell commands ask `y/n/always` unless they're on the read/build/test allowlist, or `--yolo` is set.
+- Tool output is capped (first and last 8 KB kept), and search respects `.gitignore`.
+</details>
 
-The model investigates and ends with a concrete plan: the files to change, the changes, and how it will verify them. Then you're asked:
+<details>
+<summary><b>Plan mode</b></summary>
+
+`/plan` toggles it, `/plan <task>` starts right away, and `hermit --plan -p "…"` prints a plan and exits. In plan mode the model only gets read-only tools and safe commands; writes are refused even if it tries. It ends with a concrete plan, and then:
 
 ```
 approve plan? [y] implement · [n] keep planning · or type feedback ›
 ```
+</details>
 
-`y` leaves plan mode and implements the plan, then the usual verify-and-fix loop runs. `n` stays in plan mode. Typing anything else sends it as feedback, and the model revises the plan. `hermit --plan -p "..."` prints a plan and exits; continue later with `hermit -c -p "go ahead"`.
+<details>
+<summary><b>Sub-agents</b></summary>
 
-
-**Sub-agents (`explore`).** For broad questions like "where is auth handled?", "how does a request flow through this?" or "what would this change touch?", the model can start an `explore` sub-agent on its own:
-- the sub-agent gets a fresh context window and only read-only tools (read, list, glob, grep, and read-only commands)
-- it can't edit files, write todos, save memory, or start more sub-agents
-- only its final report, capped at 12 KB, goes back into the main conversation, so large searches don't fill your context
-- it stops after 25 steps (when it reaches the limit, it's asked to report what it found)
-- it works in plan mode and with text-based tool calls
-- Ctrl-C cancels it
+For broad questions ("where is auth handled?", "what would this change touch?") the model calls `explore` on its own. The sub-agent:
+- runs in a fresh context with read-only tools only (no edits, todos, memory or more sub-agents)
+- stops after 25 steps
+- returns only its report, capped at 12 KB, to the main conversation
 
 ```
 ● Explore find token validation
@@ -161,110 +178,62 @@ approve plan? [y] implement · [n] keep planning · or type feedback ›
   │ Read src/auth.rs
   └ 3 steps · 0.1k chars report
 ```
+</details>
 
-<a id="images"></a>**Images.** Press **Ctrl+V** to paste an image from the clipboard (macOS uses the built-in `osascript`; Linux uses `wl-paste` or `xclip`). You can also type or drag in a path such as `~/Desktop/shot.png`, `'my shot.png'` or `my\ shot.png`, or include one in `-p "..."`. Both are attached as `[Image #n]`, and the model sees the image next to your text. Supported formats are PNG, JPEG, GIF and WebP.
-- **Efficient:** on macOS, images whose longest side is over 1568 px are downscaled to JPEG with the built-in `sips`, and base64 encoding is hand-written, so there are no image libraries. Only the 3 most recent images are sent; older ones become a short note. Compaction removes old images first, and sessions save a note instead of the image data.
-- **Routed to a model that can see:** hermit checks the provider's model catalog once. If the current model can't read images, the turn goes to `vision_model` if you set one, otherwise to the first image-capable model in your fallbacks, otherwise to a free model with image and tool support, and it tells you which. If none is available, only the text is sent.
+<details>
+<summary><b>Images</b></summary>
 
-**Todo list.** For multi-step tasks, the model writes a checklist with `todo_write` and updates it as it works:
+- **Attaching:** Ctrl+V pastes from the clipboard (`osascript` on macOS, `wl-paste`/`xclip` on Linux). Image paths you type or drag in are attached too. Each becomes `[Image #n]`. Formats: PNG, JPEG, GIF, WebP.
+- **Size:** on macOS, large images are downscaled to 1568 px with the built-in `sips`. No image libraries are used.
+- **Context:** only the 3 newest images are sent, and sessions store a note instead of the image data.
+- **Routing:** if the current model can't read images, that turn goes to `vision_model`, then to a vision-capable fallback, then to a free vision model from the catalog. If none is available, only the text is sent.
+</details>
 
-```
-● Todo 1/3
-  ✓ Find where totals are computed
-  ▸ Fix rounding in src/cart.rs
-  ○ Add a regression test
-```
+<details>
+<summary><b>Memory, sessions and context</b></summary>
 
-**Project memory.** When the model learns something durable, such as how to run tests, a project convention or a gotcha, it saves it with `remember`. You can also add notes yourself with `/remember`. Notes go to `HERMIT.md` in the project, or to `~/.config/hermit/HERMIT.md` for preferences that apply everywhere. Both files are loaded into every new session, along with `AGENTS.md` or `CLAUDE.md` if the project has one. `HERMIT.md` is plain Markdown, so you can edit it or commit it.
+- **Memory:** the model saves durable facts with `remember` to `./HERMIT.md`, or to `~/.config/hermit/HERMIT.md` for global preferences. These files, plus `AGENTS.md` or `CLAUDE.md`, are loaded into every session.
+- **Sessions:** saved after every turn (latest 100). Exiting prints `hermit --resume <id>`, and resuming replays the whole conversation.
+- **Compaction:** above the token budget, the model summarizes older turns (goal, changes, findings, next steps) and recent turns are kept verbatim. `/compact` does it on demand.
+- **Text tools:** models that reject native tools automatically switch to `<tool_call>{json}</tool_call>` blocks, which are hidden while streaming.
+</details>
 
-**Sessions.** Every conversation is saved to `~/.config/hermit/sessions/` after each turn, including its todo list. The 100 most recent are kept. When you leave hermit (`/exit`, Ctrl-D, or Ctrl-C twice), it prints the exact command to come back:
+<details id="install-options">
+<summary><b>Install options</b></summary>
 
-```
-Resume this session with: hermit --resume 1760234512-a1b2
-```
-
-`hermit --resume <id>` works from any folder and switches to that session's project. On resume, the whole conversation is shown again: your messages, Markdown-rendered replies, and compact tool lines, with diffs for edits. You can also use `hermit -c` (the latest session in the current folder), or `/sessions` and `/resume` in the REPL.
-
-**Context compaction.** When the conversation goes over `context_budget_tokens`, the model writes a summary of the older turns (goal, changes so far, key findings, current state, next steps). That summary replaces the older turns, and the most recent turns are kept word for word. If summarizing fails, hermit trims old tool output instead. Run `/compact` to do it by hand.
-
-**Text-based tool calling.** Some models, including many free ones, don't support native tool calling. When a model rejects tools, hermit switches automatically to `<tool_call>{json}</tool_call>` blocks in plain text and hides them from the streamed output. Conversation history is stored in a single format, so switching models or modes mid-session keeps working. To force a mode, use `--text-tools` or `tool_mode = "text"`.
-
-## Config
-
-Settings are loaded in this order, each one overriding the previous: `~/.config/hermit/config.toml`, then `./.hermit.toml`, then env vars (`HERMIT_API_KEY` or `OPENROUTER_API_KEY`, `HERMIT_MODEL`, `HERMIT_BASE_URL`), then CLI flags.
-
-```toml
-model = "poolside/laguna-s-2.1:free"
-fallback_models = ["nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free"]
-verify_cmd = "cargo test"          # override auto-detection
-allow_commands = ["make test"]     # extra commands that don't need approval
-max_steps = 40
-max_fix_attempts = 3
-context_budget_tokens = 60000
-command_timeout_secs = 120
-tool_mode = "auto"                 # auto | native | text
-vision_model = "google/gemma-4-31b-it:free"   # for image turns when the main model can't see
-
-# Any OpenAI-compatible provider works, e.g. local Ollama:
-# base_url = "http://localhost:11434/v1"
-# model = "qwen3-coder"
+```sh
+curl -fsSL …/install.sh | HERMIT_VERSION=v0.1.0 sh              # specific version
+curl -fsSL …/install.sh | HERMIT_INSTALL_DIR=/usr/local/bin sh  # other location
+cargo install --git https://github.com/Dhanush-K-Gowda/hermit-code  # from source
 ```
 
-The system prompt also includes, when they exist: user memory (`~/.config/hermit/HERMIT.md`), project memory (`./HERMIT.md`), and the first of `AGENTS.md` or `CLAUDE.md`. Each is capped at 8 KB.
-
-## Files hermit uses
-
-| Path | What |
-|---|---|
-| `~/.config/hermit/config.toml` | User config |
-| `~/.config/hermit/HERMIT.md` | User memory (preferences for every project) |
-| `~/.config/hermit/sessions/*.json` | Saved conversations (latest 100) |
-| `~/.config/hermit/history` | REPL input history |
-| `./.hermit.toml` | Per-project config |
-| `./HERMIT.md` | Project memory; worth committing so teammates get it too |
-
-`$XDG_CONFIG_HOME` is used instead of `~/.config` when it's set.
+The script checks the SHA-256 checksum and installs to `~/.local/bin`. **Uninstall:** `rm ~/.local/bin/hermit`, plus `rm -rf ~/.config/hermit` to remove config, memory and sessions. Windows isn't supported.
+</details>
 
 ## Development
 
 ```sh
-cargo test                  # unit tests + end-to-end tests against a mock model server
+cargo test                     # unit + end-to-end tests (mock model server)
 cargo clippy --all-targets
-cargo build --release       # optimized binary in target/release/hermit
+git tag v0.1.1 && git push origin v0.1.1   # release: builds and publishes binaries
 ```
 
-**Releasing:** bump `version` in `Cargo.toml`, commit, then push a matching tag:
+<details>
+<summary><b>Project layout</b></summary>
 
-```sh
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-The `release` workflow then:
-- builds macOS (arm64, x86_64) and static Linux musl (x86_64, arm64) binaries
-- checks that the tag matches the `Cargo.toml` version
-- publishes a GitHub Release with `.tar.gz` archives and `.sha256` checksums, which `install.sh` uses
-
-CI (`ci` workflow) runs clippy and the tests on macOS and Linux for every push and pull request.
-
-The end-to-end tests in `tests/agent_e2e.rs` cover:
-- a full edit → verify → fix loop
-- retry and model fallback
-- the automatic switch to text-based tool calls
-- context summarization
-- saving and resuming a session
-- plan mode refusing edits until approval
-- the main agent delegating to an `explore` sub-agent (read-only tools, only the report returned)
-- image turns routed to a vision model, or sent as text only when none exists
-
-| Module | Role |
+| | |
 |---|---|
-| `src/agent.rs` | Agent loop, verify-and-fix, compaction, sessions |
+| `src/agent.rs` | Agent loop, verify-and-fix, compaction, sub-agents, sessions |
 | `src/llm/` | Streaming client, SSE parsing, text-based tool protocol |
 | `src/tools/` | File, search, shell, todo and memory tools |
-| `src/context.rs` | Output capping, token estimates, summary split |
-| `src/session.rs` | Session save, list and resume |
-| `src/safety.rs` | Workspace confinement and command allowlist |
-| `src/repl.rs`, `src/ui.rs` | REPL commands, plan approval, terminal rendering |
-| `src/complete.rs` | Slash-command table, inline hints and Tab completion |
-| `src/image.rs` | Clipboard images, image paths, downscaling and base64 data URLs |
-| `src/markdown.rs` | Streaming Markdown renderer: redraws each line in place once it completes, and draws tables with aligned, wrapped columns |
+| `src/repl.rs` · `src/complete.rs` | REPL, slash commands, hints, plan approval |
+| `src/ui.rs` · `src/markdown.rs` | Terminal output, streaming Markdown and tables |
+| `src/image.rs` | Clipboard images, downscaling, data URLs |
+| `src/context.rs` · `src/session.rs` · `src/safety.rs` | Context budget · sessions · workspace and command rules |
+
+Releases: the `release` workflow builds macOS (arm64, x86_64) and static Linux (x86_64, arm64) binaries when a `v*` tag matching `Cargo.toml` is pushed. CI runs clippy and tests on macOS and Linux.
+</details>
+
+## License
+
+[MIT](LICENSE)
